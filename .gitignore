@@ -1,0 +1,15 @@
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor junk
+*.swp
+*~
+
+# Packaged releases (built locally, not tracked)
+*.zip
+/.release
+
+# Personal test audio dropped into the Sounds folder — not part of the addon
+PaladinSealAlert/Sounds/*
+!PaladinSealAlert/Sounds/.gitkeep

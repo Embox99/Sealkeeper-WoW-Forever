@@ -1,0 +1,12 @@
+## Interface: 16001
+## Title: Sealkeeper: Forever
+## Notes: Alerts when your Seal, Righteous Fury, or Aura falls off, and tracks party Blessings — with a movable status window.
+## Notes-ruRU: Оповещает, когда спадает Печать, Праведная ярость или Аура, и следит за Благословениями в группе — с перемещаемым окном статуса.
+## Author: embox53
+## Version: 1.0.0
+## X-Category: Buffs
+## X-License: MIT
+## SavedVariables: PaladinSealAlertDB
+
+Core.lua
+UI.lua

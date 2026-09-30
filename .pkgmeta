@@ -1,0 +1,7 @@
+package-as: PaladinSealAlert
+ignore:
+  - .github
+  - README.md
+  - LICENSE
+  - .gitignore
+  - .pkgmeta
