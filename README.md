@@ -41,7 +41,3 @@ This addon was built and tested during the first weeks of the WoW: Forever beta,
 - Clicking things in the status window doesn't trigger targeting or casting — the client's secure-action system isn't functional yet for addon-created buttons. This should resolve itself once Blizzard patches it; no addon changes will be needed.
 
 None of these affect the addon's core alerting — they only limit what's possible during combat lockdown and with custom audio.
-
-## License
-
-MIT — see [LICENSE](LICENSE).
