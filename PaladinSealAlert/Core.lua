@@ -39,6 +39,8 @@ local defaults = {
     msgRFWarning = "Righteous Fury expiring",
     showStatusWindow = true,
     statusWindowScale = 1.0,
+    statusWindowLocked = false,
+    statusIconLabels = false,      -- show icon textures instead of "Seal"/"RF"/"Aura" text on the badges
     enableAuraWatch = true,
     msgAuraExpired = "AURA NOT ACTIVE",
     msgAuraWarning = "",
@@ -358,10 +360,16 @@ local function ProcessSelfWatch(watch)
         watch.has = false
         watch.signature = nil
         watch.warned = false
+        watch.icon = nil
         return
     end
 
-    UpdateBuffState(watch, watch.find(), db.warnBeforeSeconds,
+    -- Cache the aura's own icon so the status window can show it instead of
+    -- a plain text label (each Seal/Aura variant has a different icon).
+    local aura = watch.find()
+    watch.icon = aura and aura.icon or nil
+
+    UpdateBuffState(watch, aura, db.warnBeforeSeconds,
         function() TriggerAlert(db[watch.msgWarningKey]) end,
         function() TriggerAlert(db[watch.msgExpiredKey]) end)
 end
@@ -455,11 +463,14 @@ local function PrintHelp()
     print("  /sealalert group on|off — toggle watching party members' Blessings")
     print("  /sealalert statuswindow on|off — toggle the status window (who lacks a Blessing, Righteous Fury up?)")
     print("  /sealalert scale <0.6-1.6> — resize the status window")
+    print("  /sealalert icons on|off — show icons instead of text labels on the status window badges")
+    print("  /sealalert lock on|off — lock the status window in place (stops accidental dragging)")
     print("  /sealalert status — show current settings")
     print("  /sealalert test — test the seal alert")
     print("  /sealalert testgroup — test the group blessing alert")
     print("  /sealalert reset — reset to defaults")
     print("  /sealalert options — open the settings panel")
+    print("  /sealalert testclick — EXPERIMENTAL: toggle a party1 click-cast test button (re-checks a known client limitation, see README)")
 end
 
 local function PrintStatus()
@@ -472,6 +483,9 @@ local function PrintStatus()
     print("  early warning: " .. db.warnBeforeSeconds .. "s before expiry")
     print("  text (expired): " .. db.msgExpired)
     print("  text (warning): " .. db.msgWarning)
+    print("  status window: " .. (db.showStatusWindow and "on" or "off") ..
+        ", icons: " .. (db.statusIconLabels and "on" or "off") ..
+        ", locked: " .. (db.statusWindowLocked and "on" or "off"))
     print("  Righteous Fury watch: " .. (db.enableRighteousFuryWatch and "on" or "off"))
     print("  Aura watch: " .. (db.enableAuraWatch and "on" or "off"))
     print("  group blessing watch: " .. (db.enableGroupBlessingWatch and "on" or "off") ..
@@ -493,6 +507,11 @@ local TOGGLE_COMMANDS = {
     statuswindow = { dbKey = "showStatusWindow", label = "status window",
         onChange = function()
             if PaladinSealAlert_RefreshStatusWindowVisibility then PaladinSealAlert_RefreshStatusWindowVisibility() end
+        end },
+    icons = { dbKey = "statusIconLabels", label = "status window icon labels" },
+    lock = { dbKey = "statusWindowLocked", label = "status window lock",
+        onChange = function()
+            if PaladinSealAlert_RefreshLockButton then PaladinSealAlert_RefreshLockButton() end
         end },
 }
 
@@ -590,6 +609,12 @@ SlashCmdList["PALADINSEALALERT"] = function(input)
             db[key] = value
         end
         print(PREFIX .. "settings reset")
+    elseif cmd == "testclick" then
+        if PaladinSealAlert_ToggleClickTest then
+            PaladinSealAlert_ToggleClickTest()
+        else
+            print(PREFIX .. "click test unavailable")
+        end
     elseif cmd == "options" then
         if PaladinSealAlert_OpenOptions then
             PaladinSealAlert_OpenOptions()
@@ -639,8 +664,10 @@ function PaladinSealAlert_GetStatusSnapshot()
     return {
         locked = AurasAreSecret(),
         sealUp = sealWatch and sealWatch.has or false,
+        sealIcon = sealWatch and sealWatch.icon or nil,
         auraEnabled = PaladinSealAlertDB.enableAuraWatch,
         auraUp = auraWatch and auraWatch.has or false,
+        auraIcon = auraWatch and auraWatch.icon or nil,
         rfEnabled = PaladinSealAlertDB.enableRighteousFuryWatch,
         rfUp = rfWatch and rfWatch.has or false,
         members = members,

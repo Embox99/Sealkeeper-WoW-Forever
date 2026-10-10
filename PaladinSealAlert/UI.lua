@@ -394,7 +394,20 @@ local function BuildPanel()
             db.statusWindowScale = v
             if PaladinSealAlert_ApplyStatusWindowScale then PaladinSealAlert_ApplyStatusWindowScale() end
         end)
-    y = y - 50
+    y = y - 40
+
+    AddCheckbox(content, "Use icons instead of text labels (Seal/RF/Aura badges)", 20, y,
+        function() return db.statusIconLabels end,
+        function(v) db.statusIconLabels = v end)
+    y = y - 26
+
+    AddCheckbox(content, "Lock status window position", 20, y,
+        function() return db.statusWindowLocked end,
+        function(v)
+            db.statusWindowLocked = v
+            if PaladinSealAlert_RefreshLockButton then PaladinSealAlert_RefreshLockButton() end
+        end)
+    y = y - 40
 
     -- ---- Seal / self alert sound ----
     local sealSoundTitle = content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
@@ -578,7 +591,11 @@ local function SaveStatusWindowPosition()
     db.statusWindowY = y
 end
 
-statusWindow:SetScript("OnDragStart", function(self) self:StartMoving() end)
+statusWindow:SetScript("OnDragStart", function(self)
+    local db = PaladinSealAlertDB
+    if db and db.statusWindowLocked then return end
+    self:StartMoving()
+end)
 statusWindow:SetScript("OnDragStop", function(self)
     self:StopMovingOrSizing()
     SaveStatusWindowPosition()
@@ -604,6 +621,46 @@ closeButton:SetScript("OnClick", function()
     statusWindow:Hide()
 end)
 
+-- ---- Lock toggle + quick resize buttons, in a small row under the title ----
+
+local lockButton = CreateFrame("Button", nil, statusWindow, "UIPanelButtonTemplate")
+lockButton:SetSize(50, 16)
+lockButton:SetPoint("TOPLEFT", 6, -22)
+lockButton:GetFontString():SetFontObject("GameFontHighlightSmall")
+
+function PaladinSealAlert_RefreshLockButton()
+    local db = PaladinSealAlertDB
+    lockButton:SetText(db and db.statusWindowLocked and "Locked" or "Unlocked")
+end
+
+lockButton:SetScript("OnClick", function()
+    local db = PaladinSealAlertDB
+    if not db then return end
+    db.statusWindowLocked = not db.statusWindowLocked
+    PaladinSealAlert_RefreshLockButton()
+end)
+
+local SCALE_STEP = 0.1
+
+local function NudgeStatusWindowScale(delta)
+    local db = PaladinSealAlertDB
+    if not db then return end
+    db.statusWindowScale = math.max(0.6, math.min(1.6, db.statusWindowScale + delta))
+    if PaladinSealAlert_ApplyStatusWindowScale then PaladinSealAlert_ApplyStatusWindowScale() end
+end
+
+local shrinkButton = CreateFrame("Button", nil, statusWindow, "UIPanelButtonTemplate")
+shrinkButton:SetSize(18, 16)
+shrinkButton:SetPoint("TOPRIGHT", -24, -22)
+shrinkButton:SetText("-")
+shrinkButton:SetScript("OnClick", function() NudgeStatusWindowScale(-SCALE_STEP) end)
+
+local growButton = CreateFrame("Button", nil, statusWindow, "UIPanelButtonTemplate")
+growButton:SetSize(18, 16)
+growButton:SetPoint("LEFT", shrinkButton, "RIGHT", 2, 0)
+growButton:SetText("+")
+growButton:SetScript("OnClick", function() NudgeStatusWindowScale(SCALE_STEP) end)
+
 -- Status colors shared by the badges and the member bars below.
 local COLOR_OK   = { 0.25, 1, 0.25 }
 local COLOR_BAD  = { 1, 0.3, 0.3 }
@@ -611,7 +668,11 @@ local COLOR_WARN = { 1, 0.6, 0 }
 
 -- ---- Top row: 3 small badges for Seal / Righteous Fury / Aura ----
 
-local BADGE_WIDTH, BADGE_HEIGHT, BADGE_GAP, BADGE_Y = 48, 30, 4, -26
+local BADGE_WIDTH, BADGE_HEIGHT, BADGE_GAP, BADGE_Y = 48, 30, 4, -46
+
+local RF_ICON = "Interface\\Icons\\Spell_Holy_SealOfFury"
+local DEFAULT_SEAL_ICON = "Interface\\Icons\\Spell_Holy_SealOfWrath"
+local DEFAULT_AURA_ICON = "Interface\\Icons\\Spell_Holy_DevotionAura"
 
 local function CreateBadge(label)
     local badge = CreateFrame("Frame", nil, statusWindow, "BackdropTemplate")
@@ -629,6 +690,15 @@ local function CreateBadge(label)
     text:SetPoint("CENTER")
     text:SetText(label)
     badge.text = text
+
+    -- Alternate to the text label when icon mode is on (see SetBadgeStatus).
+    local icon = badge:CreateTexture(nil, "ARTWORK")
+    icon:SetPoint("TOPLEFT", 3, -3)
+    icon:SetPoint("BOTTOMRIGHT", -3, 3)
+    icon:SetTexCoord(0.08, 0.92, 0.08, 0.92) -- trim the icon's built-in border art
+    icon:Hide()
+    badge.icon = icon
+
     return badge
 end
 
@@ -636,10 +706,22 @@ local sealBadge = CreateBadge("Seal")
 local rfBadge = CreateBadge("RF")
 local auraBadge = CreateBadge("Aura")
 
-local function SetBadgeStatus(badge, up)
+local function SetBadgeStatus(badge, up, iconPath)
     local c = up and COLOR_OK or COLOR_BAD
     badge:SetBackdropBorderColor(c[1], c[2], c[3], 1)
-    badge.text:SetTextColor(c[1], c[2], c[3])
+
+    local db = PaladinSealAlertDB
+    if db and db.statusIconLabels and iconPath then
+        badge.icon:SetTexture(iconPath)
+        badge.icon:SetDesaturated(not up)
+        badge.icon:Show()
+        badge.text:Hide()
+    else
+        badge.text:SetTextColor(c[1], c[2], c[3])
+        badge.text:Show()
+        badge.icon:Hide()
+    end
+
     badge:Show()
 end
 
@@ -748,18 +830,18 @@ local function RefreshStatusWindow()
     local snapshot = PaladinSealAlert_GetStatusSnapshot()
 
     local visibleBadges = {}
-    SetBadgeStatus(sealBadge, snapshot.sealUp)
+    SetBadgeStatus(sealBadge, snapshot.sealUp, snapshot.sealIcon or DEFAULT_SEAL_ICON)
     table.insert(visibleBadges, sealBadge)
 
     if snapshot.rfEnabled then
-        SetBadgeStatus(rfBadge, snapshot.rfUp)
+        SetBadgeStatus(rfBadge, snapshot.rfUp, RF_ICON)
         table.insert(visibleBadges, rfBadge)
     else
         rfBadge:Hide()
     end
 
     if snapshot.auraEnabled then
-        SetBadgeStatus(auraBadge, snapshot.auraUp)
+        SetBadgeStatus(auraBadge, snapshot.auraUp, snapshot.auraIcon or DEFAULT_AURA_ICON)
         table.insert(visibleBadges, auraBadge)
     else
         auraBadge:Hide()
@@ -825,6 +907,69 @@ statusWindowInit:SetScript("OnEvent", function()
         statusWindow:SetPoint(db.statusWindowPoint, UIParent, db.statusWindowRelPoint or db.statusWindowPoint, db.statusWindowX, db.statusWindowY)
     end
     PaladinSealAlert_ApplyStatusWindowScale()
+    PaladinSealAlert_RefreshLockButton()
     PaladinSealAlert_RefreshStatusWindowVisibility()
 end)
+
+-- ---------------------------------------------------------------------------
+-- EXPERIMENTAL — re-checking a known client limitation, not a real feature.
+-- Click-casting via SecureActionButtonTemplate was tested extensively before
+-- (type=target+unit, type=macro, inline macrotext, RunMacro()) and none of
+-- it executed on this beta client — proven with PostClick logging showing
+-- the action never actually fired. This is one more isolated test, this
+-- time with modifier-keyed spell attributes bound straight to party1
+-- (skipping macros and @mouseover entirely, since our rows aren't real
+-- unit frames). If the client's been patched since, this is how we'd see it.
+-- ---------------------------------------------------------------------------
+
+local clickTestButton = CreateFrame("Button", "PaladinSealAlertClickTest", UIParent, "SecureActionButtonTemplate, BackdropTemplate")
+clickTestButton:SetSize(90, 30)
+clickTestButton:SetPoint("CENTER", 0, 150)
+clickTestButton:SetFrameStrata("HIGH")
+clickTestButton:RegisterForClicks("AnyUp", "AnyDown")
+clickTestButton:SetAttribute("unit", "party1")
+clickTestButton:SetAttribute("type1", "spell")
+clickTestButton:SetAttribute("spell1", "Blessing of Kings")
+clickTestButton:SetAttribute("ctrl-type1", "spell")
+clickTestButton:SetAttribute("ctrl-spell1", "Blessing of Might")
+clickTestButton:SetAttribute("shift-type1", "spell")
+clickTestButton:SetAttribute("shift-spell1", "Blessing of Wisdom")
+
+if clickTestButton.SetBackdrop then
+    clickTestButton:SetBackdrop({
+        bgFile = "Interface\\Buttons\\WHITE8x8",
+        edgeFile = "Interface\\Buttons\\WHITE8x8",
+        edgeSize = 1,
+    })
+    clickTestButton:SetBackdropColor(0.5, 0, 0, 0.8)
+    clickTestButton:SetBackdropBorderColor(1, 1, 0, 1)
+end
+
+local clickTestText = clickTestButton:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+clickTestText:SetPoint("CENTER")
+clickTestText:SetText("party1 test")
+
+clickTestButton:SetMovable(true)
+clickTestButton:EnableMouse(true)
+clickTestButton:RegisterForDrag("RightButton")
+clickTestButton:SetScript("OnDragStart", clickTestButton.StartMoving)
+clickTestButton:SetScript("OnDragStop", clickTestButton.StopMovingOrSizing)
+
+clickTestButton:SetScript("PostClick", function(self, button)
+    print("|cff3399ffSealkeeper test|r: click fired (" .. button .. "). Check your cast bar / combat log / party1's buffs for whether the spell actually went out.")
+end)
+
+clickTestButton:Hide()
+
+function PaladinSealAlert_ToggleClickTest()
+    if clickTestButton:IsShown() then
+        clickTestButton:Hide()
+    else
+        if not UnitExists("party1") then
+            print("|cff3399ffSealkeeper test|r: you need to be in a party (party1 must exist) for this test to mean anything.")
+        end
+        clickTestButton:Show()
+        print("|cff3399ffSealkeeper test|r: shown. Plain click = Kings, Ctrl+click = Might, Shift+click = Wisdom, target is party1. Right-click-drag to move it.")
+    end
+end
 
