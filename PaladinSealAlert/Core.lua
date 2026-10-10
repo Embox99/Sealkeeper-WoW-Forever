@@ -4,6 +4,21 @@ local ADDON_FOLDER = "PaladinSealAlert"
 
 local PREFIX = "|cff3399ffSealkeeper|r: "
 
+-- Which Blessing each click type on a status window row casts — keyed so
+-- both the slash command and the options panel dropdown can validate/label
+-- against the same list. Exposed below for UI.lua.
+local BLESSING_SPELLS = {
+    kings  = "Blessing of Kings",
+    might  = "Blessing of Might",
+    wisdom = "Blessing of Wisdom",
+}
+local BLESSING_ORDER = { "kings", "might", "wisdom" }
+local BLESSING_CLICK_DB_KEYS = {
+    click = "blessingPlainKey",
+    ctrl  = "blessingCtrlKey",
+    shift = "blessingShiftKey",
+}
+
 -- ---------------------------------------------------------------------------
 -- Defaults / saved settings
 -- ---------------------------------------------------------------------------
@@ -41,6 +56,9 @@ local defaults = {
     statusWindowScale = 1.0,
     statusWindowLocked = false,
     statusIconLabels = true,       -- show icon textures instead of "Seal"/"RF"/"Aura" text on the badges
+    blessingPlainKey = "kings",    -- which Blessing each click type casts on a party row — see BLESSING_SPELLS below
+    blessingCtrlKey = "might",
+    blessingShiftKey = "wisdom",
     enableAuraWatch = true,
     msgAuraExpired = "AURA NOT ACTIVE",
     msgAuraWarning = "",
@@ -465,12 +483,12 @@ local function PrintHelp()
     print("  /sealalert scale <0.6-1.6> — resize the status window")
     print("  /sealalert icons on|off — show icons instead of text labels on the status window badges")
     print("  /sealalert lock on|off — lock the status window in place (stops accidental dragging)")
+    print("  /sealalert blessing click|ctrl|shift kings|might|wisdom — set which Blessing each click type casts on a party row")
     print("  /sealalert status — show current settings")
     print("  /sealalert test — test the seal alert")
     print("  /sealalert testgroup — test the group blessing alert")
     print("  /sealalert reset — reset to defaults")
     print("  /sealalert options — open the settings panel")
-    print("  /sealalert testclick — EXPERIMENTAL: toggle a party1 click-cast test button (SecureUnitButtonTemplate, see README)")
 end
 
 local function PrintStatus()
@@ -486,6 +504,7 @@ local function PrintStatus()
     print("  status window: " .. (db.showStatusWindow and "on" or "off") ..
         ", icons: " .. (db.statusIconLabels and "on" or "off") ..
         ", locked: " .. (db.statusWindowLocked and "on" or "off"))
+    print("  party row clicks: click=" .. db.blessingPlainKey .. ", ctrl=" .. db.blessingCtrlKey .. ", shift=" .. db.blessingShiftKey)
     print("  Righteous Fury watch: " .. (db.enableRighteousFuryWatch and "on" or "off"))
     print("  Aura watch: " .. (db.enableAuraWatch and "on" or "off"))
     print("  group blessing watch: " .. (db.enableGroupBlessingWatch and "on" or "off") ..
@@ -591,6 +610,19 @@ SlashCmdList["PALADINSEALALERT"] = function(input)
             if PaladinSealAlert_ApplyStatusWindowScale then PaladinSealAlert_ApplyStatusWindowScale() end
             print(PREFIX .. "status window scale: " .. scale)
         end
+    elseif cmd == "blessing" and args[2] and args[3] then
+        local clickKey = args[2]:lower()
+        local blessingKey = args[3]:lower()
+        local dbKey = BLESSING_CLICK_DB_KEYS[clickKey]
+        if not dbKey then
+            print(PREFIX .. "unknown click type. Available: click, ctrl, shift")
+        elseif not BLESSING_SPELLS[blessingKey] then
+            print(PREFIX .. "unknown blessing. Available: kings, might, wisdom")
+        else
+            db[dbKey] = blessingKey
+            if PaladinSealAlert_RefreshBlessingBindings then PaladinSealAlert_RefreshBlessingBindings() end
+            print(PREFIX .. clickKey .. "-click now casts " .. BLESSING_SPELLS[blessingKey])
+        end
     elseif cmd == "status" then
         PrintStatus()
     elseif cmd == "test" then
@@ -606,12 +638,6 @@ SlashCmdList["PALADINSEALALERT"] = function(input)
             db[key] = value
         end
         print(PREFIX .. "settings reset")
-    elseif cmd == "testclick" then
-        if PaladinSealAlert_ToggleClickTest then
-            PaladinSealAlert_ToggleClickTest()
-        else
-            print(PREFIX .. "click test unavailable")
-        end
     elseif cmd == "options" then
         if PaladinSealAlert_OpenOptions then
             PaladinSealAlert_OpenOptions()
@@ -625,6 +651,8 @@ end
 
 -- Exposed for UI.lua
 PaladinSealAlert_SoundPresetOrder = SOUND_PRESET_ORDER
+PaladinSealAlert_BlessingSpells = BLESSING_SPELLS
+PaladinSealAlert_BlessingOrder = BLESSING_ORDER
 PaladinSealAlert_TriggerTest = function() TriggerAlert(PaladinSealAlertDB.msgExpired) end
 PaladinSealAlert_TriggerGroupTest = function()
     TriggerAlert(FormatGroupMessage(PaladinSealAlertDB.msgGroupExpired, UnitName("player")), true)
@@ -649,12 +677,26 @@ function PaladinSealAlert_GetStatusSnapshot()
             else
                 classToken = select(2, UnitClass(unit))
             end
+            -- UnitInRange's results are "secret" values on this client (same
+            -- anti-automation system as aura reads) — booleans that throw if
+            -- you test them directly. Wrapped in pcall; if it throws, we
+            -- just can't tell and assume in-range rather than block casts.
+            local outOfRange = false
+            pcall(function()
+                local inRange, rangeChecked = UnitInRange(unit)
+                if rangeChecked and not inRange then
+                    outOfRange = true
+                end
+            end)
             table.insert(members, {
+                unit = unit,
                 name = UnitName(unit) or unit,
                 hasBuff = state and state.has or false,
                 buffIcon = state and state.icon or nil,
                 otherBuffIcon = state and state.otherIcon or nil,
                 class = classToken,
+                online = UnitIsConnected(unit),
+                outOfRange = outOfRange,
             })
         end
     end

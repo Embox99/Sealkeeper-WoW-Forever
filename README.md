@@ -6,10 +6,11 @@ Stop staring at your buff bar. **Sealkeeper: Forever** is a Paladin addon built 
 
 - **Seal / Righteous Fury / Aura alerts** — a popup banner and/or sound the instant one of these drops off, with an optional early warning a few seconds before it expires. Never get caught with a dead Seal mid-pull again.
 - **Party Blessing tracking** — tracks whether *your* Blessing specifically (not just "a" Blessing from any paladin) is up on each party member, so you always know who still needs a buff.
-- **Movable status window** — a small always-on panel with three badges (Seal / RF / Aura) that light up red when something's missing, plus one row per party member:
+- **Movable status window** — a small always-on panel with three badges (Seal / RF / Aura, icons by default, switchable to plain text) that light up red when something's missing, plus one row per party member:
   - **Your own Blessing icon on the left** of the name, **another paladin's Blessing icon on the right** — at a glance you can tell if someone's covered, and by whom.
-  - Rows turn green when the player has your Blessing, red when they don't.
-  - Drag it anywhere; **right-click it to open the settings panel** instantly, no slash command needed.
+  - Rows turn green when the player has your Blessing, red when they don't, and grey with an **"(offline)"** or **"(out of range)"** label when you can't reach them.
+  - **Click a row to cast a Blessing on that member directly** — plain click = Blessing of Kings, Ctrl-click = Might, Shift-click = Wisdom by default, and each one is reassignable in the settings panel. No targeting, no macros to set up yourself, and it never misfires onto your current target or yourself.
+  - Drag it anywhere, or right-click for a quick menu: resize, lock the window in place, or jump to the full settings panel.
 - **Fully configurable** — pick your own sounds (built-in presets or a custom file), colors, text size, and messages for every alert, all from an in-game settings panel (slash commands work too, if you prefer those).
 - **Class-colored names** — party rows are colored by class so your raid frames and the status window always agree at a glance.
 
@@ -27,6 +28,7 @@ Type `/sealalert options` in-game to open the full settings panel, or `/sealaler
 /sealalert sound on|off
 /sealalert group on|off
 /sealalert scale 1.2
+/sealalert blessing ctrl wisdom
 /sealalert options
 ```
 
@@ -35,7 +37,8 @@ Type `/sealalert options` in-game to open the full settings panel, or `/sealaler
 This addon was built and tested during the first weeks of the WoW: Forever beta, which has a few client-side quirks worth knowing about:
 
 - **Custom sound files** (`PlaySoundFile`) are currently silent on this client — a client bug, not an addon bug. Stick to the built-in sound presets until Blizzard fixes it.
-- **Buff reads are blocked entirely while you're in combat.** This is a deliberate client restriction (aura data is hidden from addons during combat), so the status window shows the last known state instead of live data until combat ends.
-- Clicking things in the status window doesn't trigger targeting or casting — the client's secure-action system isn't functional yet for addon-created buttons. This should resolve itself once Blizzard patches it; no addon changes will be needed.
+- **Buff reads are blocked entirely while you're in combat.** This is a deliberate client restriction (aura data is hidden from addons during combat), so the status window shows the last known state instead of live data until combat ends. Click-to-cast still works mid-fight — it doesn't need a fresh aura read.
+- **Click-cast bindings can't be changed while in combat.** Protected click attributes are frozen during a fight; reassign a Blessing to a different click type between pulls instead.
+- **"Out of range" detection is best-effort.** Range checks are subject to the same anti-automation restriction as buff reads on this client, so a member who's actually out of range may not always get flagged — offline detection is unaffected and always accurate.
 
 None of these affect the addon's core alerting — they only limit what's possible during combat lockdown and with custom audio.

@@ -406,6 +406,32 @@ local function BuildPanel()
         function(v) db.statusWindowLocked = v end)
     y = y - 40
 
+    local blessingTitle = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    blessingTitle:SetPoint("TOPLEFT", 20, y)
+    blessingTitle:SetText("Click-to-Blessing (clicking a party row)")
+    y = y - 24
+
+    local BLESSING_LABELS = {}
+    for key, spellName in pairs(PaladinSealAlert_BlessingSpells or {}) do
+        BLESSING_LABELS[key] = spellName:gsub("^Blessing of ", "")
+    end
+    local blessingOrder = PaladinSealAlert_BlessingOrder or {}
+
+    local BLESSING_CLICK_SLOTS = {
+        { label = "Click:",       x = 20,  dbKey = "blessingPlainKey" },
+        { label = "Ctrl-click:",  x = 160, dbKey = "blessingCtrlKey" },
+        { label = "Shift-click:", x = 300, dbKey = "blessingShiftKey" },
+    }
+    for _, slot in ipairs(BLESSING_CLICK_SLOTS) do
+        AddDropdown(content, slot.label, slot.x, y, 110, blessingOrder, BLESSING_LABELS,
+            function() return db[slot.dbKey] end,
+            function(v)
+                db[slot.dbKey] = v
+                if PaladinSealAlert_RefreshBlessingBindings then PaladinSealAlert_RefreshBlessingBindings() end
+            end)
+    end
+    y = y - 56
+
     -- ---- Seal / self alert sound ----
     local sealSoundTitle = content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     sealSoundTitle:SetPoint("TOPLEFT", 20, y)
@@ -610,11 +636,21 @@ closeButton:SetScript("OnClick", function()
     statusWindow:Hide()
 end)
 
--- ---- Right-click context menu: lock/unlock position, open settings ----
+-- ---- Right-click context menu: size, lock/unlock, advanced settings ----
+
+local SCALE_STEP = 0.1
+
+local function NudgeStatusWindowScale(delta)
+    local db = PaladinSealAlertDB
+    if not db then return end
+    db.statusWindowScale = math.max(0.6, math.min(1.6, db.statusWindowScale + delta))
+    if PaladinSealAlert_ApplyStatusWindowScale then PaladinSealAlert_ApplyStatusWindowScale() end
+end
 
 local contextMenu = CreateFrame("Frame", nil, statusWindow, "BackdropTemplate")
-contextMenu:SetSize(130, 52)
+contextMenu:SetSize(130, 96)
 contextMenu:SetFrameStrata("TOOLTIP")
+contextMenu:SetClampedToScreen(true)
 if contextMenu.SetBackdrop then
     contextMenu:SetBackdrop({
         bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
@@ -657,15 +693,23 @@ local function AddMenuButton(index)
     return btn
 end
 
-local lockMenuItem = AddMenuButton(1)
+local smallerMenuItem = AddMenuButton(1)
+smallerMenuItem.text:SetText("Smaller")
+smallerMenuItem:SetScript("OnClick", function() NudgeStatusWindowScale(-SCALE_STEP) end)
+
+local largerMenuItem = AddMenuButton(2)
+largerMenuItem.text:SetText("Larger")
+largerMenuItem:SetScript("OnClick", function() NudgeStatusWindowScale(SCALE_STEP) end)
+
+local lockMenuItem = AddMenuButton(3)
 lockMenuItem:SetScript("OnClick", function()
     local db = PaladinSealAlertDB
     if db then db.statusWindowLocked = not db.statusWindowLocked end
     HideStatusContextMenu()
 end)
 
-local settingsMenuItem = AddMenuButton(2)
-settingsMenuItem.text:SetText("Settings...")
+local settingsMenuItem = AddMenuButton(4)
+settingsMenuItem.text:SetText("Advanced settings...")
 settingsMenuItem:SetScript("OnClick", function()
     if PaladinSealAlert_OpenOptions then PaladinSealAlert_OpenOptions() end
     HideStatusContextMenu()
@@ -675,51 +719,34 @@ local function ShowStatusContextMenu()
     local db = PaladinSealAlertDB
     lockMenuItem.text:SetText(db and db.statusWindowLocked and "Unlock position" or "Lock position")
 
-    local scale = UIParent:GetEffectiveScale()
-    local x, y = GetCursorPosition()
+    -- Anchored to the window itself (which is already clamped to the
+    -- screen) instead of the cursor, so it can't end up off-screen when the
+    -- window sits near a screen edge.
     contextMenu:ClearAllPoints()
-    contextMenu:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", x / scale, y / scale)
+    contextMenu:SetPoint("TOP", statusWindow, "TOP", 0, -4)
     contextMenu:Show()
     menuCatcher:Show()
 end
 
--- Right-click anywhere on the window (background, not the rows/badges) opens
--- the context menu above.
-statusWindow:SetScript("OnMouseUp", function(self, button)
+-- Right-click anywhere on the window opens the context menu above. Shared
+-- by the window background, the party rows, and the combat row below —
+-- they're separate mouse-enabled frames, so each needs its own hookup.
+local function OnRightClickOpenMenu(self, button)
     if button == "RightButton" then
         ShowStatusContextMenu()
     end
-end)
-
-local SCALE_STEP = 0.1
-
-local function NudgeStatusWindowScale(delta)
-    local db = PaladinSealAlertDB
-    if not db then return end
-    db.statusWindowScale = math.max(0.6, math.min(1.6, db.statusWindowScale + delta))
-    if PaladinSealAlert_ApplyStatusWindowScale then PaladinSealAlert_ApplyStatusWindowScale() end
 end
-
-local shrinkButton = CreateFrame("Button", nil, statusWindow, "UIPanelButtonTemplate")
-shrinkButton:SetSize(18, 16)
-shrinkButton:SetPoint("TOPRIGHT", -24, -22)
-shrinkButton:SetText("-")
-shrinkButton:SetScript("OnClick", function() NudgeStatusWindowScale(-SCALE_STEP) end)
-
-local growButton = CreateFrame("Button", nil, statusWindow, "UIPanelButtonTemplate")
-growButton:SetSize(18, 16)
-growButton:SetPoint("LEFT", shrinkButton, "RIGHT", 2, 0)
-growButton:SetText("+")
-growButton:SetScript("OnClick", function() NudgeStatusWindowScale(SCALE_STEP) end)
+statusWindow:SetScript("OnMouseUp", OnRightClickOpenMenu)
 
 -- Status colors shared by the badges and the member bars below.
-local COLOR_OK   = { 0.25, 1, 0.25 }
-local COLOR_BAD  = { 1, 0.3, 0.3 }
-local COLOR_WARN = { 1, 0.6, 0 }
+local COLOR_OK      = { 0.25, 1, 0.25 }
+local COLOR_BAD     = { 1, 0.3, 0.3 }
+local COLOR_WARN    = { 1, 0.6, 0 }
+local COLOR_OFFLINE = { 0.55, 0.55, 0.55 }
 
 -- ---- Top row: 3 small badges for Seal / Righteous Fury / Aura ----
 
-local BADGE_WIDTH, BADGE_HEIGHT, BADGE_GAP, BADGE_Y = 48, 30, 4, -46
+local BADGE_WIDTH, BADGE_HEIGHT, BADGE_GAP, BADGE_Y = 48, 30, 4, -26
 
 local RF_ICON = "Interface\\Icons\\Spell_Holy_SealOfFury"
 local DEFAULT_SEAL_ICON = "Interface\\Icons\\Spell_Holy_SealOfWrath"
@@ -786,64 +813,143 @@ local function LayoutBadges(visibleBadges)
     end
 end
 
--- ---- Below: one filled bar per party member, red/green tinted by status ----
+-- ---- Below: one row per party member, red/green tinted by status ----
+-- Each row casts a Blessing on its own member directly: plain click = Kings,
+-- Ctrl = Might, Shift = Wisdom. Rows are built once per possible unit slot
+-- (player/party1-4) at load time and never rebound afterward — a secure
+-- frame's attributes can't be changed from insecure code during combat, so
+-- reusing rows by position (whoever's Nth in the list) would break the
+-- first time someone's state changed mid-fight. One fixed row per unit,
+-- shown or hidden as that unit comes and goes, avoids that entirely. This
+-- mirrors Decursive's own click-cast buttons (SecureUnitButtonTemplate +
+-- per-modifier macrotext, see Dcr_DebuffsFrame.lua).
 
 local BAR_HEIGHT, BAR_GAP = 20, 2
-local barRows = {}
+local STATUS_ROW_UNITS = { "player", "party1", "party2", "party3", "party4" }
 
-local function GetBarRow(index)
-    local row = barRows[index]
-    if not row then
-        -- Just a Button for the hover highlight — no click action (targeting
-        -- from addon code doesn't work on this client, tested and confirmed).
-        row = CreateFrame("Button", nil, statusWindow)
-        row:SetHeight(BAR_HEIGHT)
+local function GetBlessingSpell(dbKey, fallbackKey)
+    local db = PaladinSealAlertDB
+    local key = (db and db[dbKey]) or fallbackKey
+    return (PaladinSealAlert_BlessingSpells and PaladinSealAlert_BlessingSpells[key]) or "Blessing of Kings"
+end
 
-        local bg = row:CreateTexture(nil, "BACKGROUND")
-        bg:SetAllPoints()
-        row.bg = bg
-
-        local accent = row:CreateTexture(nil, "ARTWORK")
-        accent:SetPoint("TOPLEFT")
-        accent:SetPoint("BOTTOMLEFT")
-        accent:SetWidth(3)
-        row.accent = accent
-
-        -- Shows the Blessing's actual icon next to names that have one.
-        local icon = row:CreateTexture(nil, "ARTWORK")
-        icon:SetSize(14, 14)
-        icon:SetPoint("LEFT", 6, 0)
-        icon:Hide()
-        row.icon = icon
-
-        -- Same, mirrored on the right, for some other paladin's Blessing.
-        local otherIcon = row:CreateTexture(nil, "ARTWORK")
-        otherIcon:SetSize(14, 14)
-        otherIcon:SetPoint("RIGHT", -4, 0)
-        otherIcon:Hide()
-        row.otherIcon = otherIcon
-
-        local text = row:CreateFontString(nil, "OVERLAY")
-        text:SetPoint("LEFT", 26, 0)
-        -- WoW's system fonts have no separate bold cut, so OUTLINE at a
-        -- larger size is the usual way to get a bolder-reading name.
-        local ok = pcall(function()
-            text:SetFont("Fonts\\FRIZQT__.TTF", 13, "OUTLINE")
-        end)
-        if not ok then
-            text:SetFontObject("GameFontHighlightSmall")
-        end
-        row.text = text
-
-        local highlight = row:CreateTexture(nil, "HIGHLIGHT")
-        highlight:SetAllPoints()
-        highlight:SetColorTexture(1, 1, 1, 0.12)
-        row:SetHighlightTexture(highlight)
-
-        barRows[index] = row
+-- (Re)writes a row's click attributes from the current Blessing bindings.
+-- Only safe to call out of combat — secure attributes on an existing frame
+-- can't be changed from insecure code during a fight.
+--
+-- "help" and the leading /stopcasting matter: without a condition, casting
+-- on an offline or invalid unit falls through to your current target (or
+-- yourself) instead of just failing — the same gotcha every mouseover macro
+-- has to guard against. "exists" alone isn't enough — an offline party
+-- member still "exists" in the roster; "help" requires an actually-valid
+-- friendly cast target, which offline members fail.
+local function ApplyBlessingAttributes(row, unit)
+    local function MacroFor(spell)
+        return "/stopcasting\n/cast [@" .. unit .. ",help] " .. spell
     end
+    row:SetAttribute("type1", "macro")
+    row:SetAttribute("macrotext1", MacroFor(GetBlessingSpell("blessingPlainKey", "kings")))
+    row:SetAttribute("ctrl-type1", "macro")
+    row:SetAttribute("ctrl-macrotext1", MacroFor(GetBlessingSpell("blessingCtrlKey", "might")))
+    row:SetAttribute("shift-type1", "macro")
+    row:SetAttribute("shift-macrotext1", MacroFor(GetBlessingSpell("blessingShiftKey", "wisdom")))
+end
+
+local function AddBarVisuals(row)
+    local bg = row:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    row.bg = bg
+
+    local accent = row:CreateTexture(nil, "ARTWORK")
+    accent:SetPoint("TOPLEFT")
+    accent:SetPoint("BOTTOMLEFT")
+    accent:SetWidth(3)
+    row.accent = accent
+
+    -- Shows the Blessing's actual icon next to names that have one.
+    local icon = row:CreateTexture(nil, "ARTWORK")
+    icon:SetSize(14, 14)
+    icon:SetPoint("LEFT", 6, 0)
+    icon:Hide()
+    row.icon = icon
+
+    -- Same, mirrored on the right, for some other paladin's Blessing.
+    local otherIcon = row:CreateTexture(nil, "ARTWORK")
+    otherIcon:SetSize(14, 14)
+    otherIcon:SetPoint("RIGHT", -4, 0)
+    otherIcon:Hide()
+    row.otherIcon = otherIcon
+
+    local text = row:CreateFontString(nil, "OVERLAY")
+    text:SetPoint("LEFT", 26, 0)
+    -- WoW's system fonts have no separate bold cut, so OUTLINE at a
+    -- larger size is the usual way to get a bolder-reading name.
+    local ok = pcall(function()
+        text:SetFont("Fonts\\FRIZQT__.TTF", 13, "OUTLINE")
+    end)
+    if not ok then
+        text:SetFontObject("GameFontHighlightSmall")
+    end
+    row.text = text
+
+    local highlight = row:CreateTexture(nil, "HIGHLIGHT")
+    highlight:SetAllPoints()
+    highlight:SetColorTexture(1, 1, 1, 0.12)
+    row:SetHighlightTexture(highlight)
+end
+
+local function CreateBarRowForUnit(unit)
+    local row = CreateFrame("Button", nil, statusWindow, "SecureUnitButtonTemplate")
+    row:SetHeight(BAR_HEIGHT)
+    row:Hide()
+    row:RegisterForClicks("AnyUp")
+    row:SetAttribute("unit", unit)
+    ApplyBlessingAttributes(row, unit)
+
+    AddBarVisuals(row)
+
+    row:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText(UnitName(unit) or unit)
+        GameTooltip:AddLine("Click: " .. GetBlessingSpell("blessingPlainKey", "kings"), 1, 1, 1)
+        GameTooltip:AddLine("Ctrl-click: " .. GetBlessingSpell("blessingCtrlKey", "might"), 1, 1, 1)
+        GameTooltip:AddLine("Shift-click: " .. GetBlessingSpell("blessingShiftKey", "wisdom"), 1, 1, 1)
+        GameTooltip:Show()
+    end)
+    row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    -- The row is a mouse-enabled Button sitting on top of the window, so a
+    -- right-click here never reaches statusWindow's own OnMouseUp — hook it
+    -- straight onto the row too (see OnRightClickOpenMenu above).
+    row:HookScript("OnMouseUp", OnRightClickOpenMenu)
+
     return row
 end
+
+-- Built once, out of combat, at load time — see the note above.
+local barRowsByUnit = {}
+for _, unit in ipairs(STATUS_ROW_UNITS) do
+    barRowsByUnit[unit] = CreateBarRowForUnit(unit)
+end
+
+-- Called when the Blessing bindings change in the options panel. Refuses
+-- in combat instead of throwing — secure attributes are frozen mid-fight.
+function PaladinSealAlert_RefreshBlessingBindings()
+    if InCombatLockdown and InCombatLockdown() then
+        print("|cff3399ffSealkeeper|r: can't change click-cast bindings in combat — try again after the fight.")
+        return
+    end
+    for unit, row in pairs(barRowsByUnit) do
+        ApplyBlessingAttributes(row, unit)
+    end
+end
+
+-- Not tied to a real unit, so it's a plain (non-secure) Button — still a
+-- Button, not a Frame, since AddBarVisuals' highlight texture needs one.
+local combatRow = CreateFrame("Button", nil, statusWindow)
+combatRow:SetHeight(BAR_HEIGHT)
+AddBarVisuals(combatRow)
+combatRow:SetScript("OnMouseUp", OnRightClickOpenMenu)
 
 local function GetClassColor(classToken)
     local c = classToken and RAID_CLASS_COLORS and RAID_CLASS_COLORS[classToken]
@@ -851,11 +957,14 @@ local function GetClassColor(classToken)
     return 1, 1, 1
 end
 
--- mode: "ok" (green), "bad" (red), or "warn" (amber, for the in-combat note).
+-- mode: "ok" (green), "bad" (red, the default), "warn" (amber, in-combat
+-- note), or "offline" (grey, member can't be clicked right now).
+local MODE_COLORS = { ok = COLOR_OK, warn = COLOR_WARN, offline = COLOR_OFFLINE }
+
 -- The bar carries the buff status; classToken colors the name by class.
 -- buffIcon/otherBuffIcon show your Blessing and someone else's, if present.
 local function SetBarStatus(row, label, mode, classToken, buffIcon, otherBuffIcon)
-    local c = mode == "ok" and COLOR_OK or (mode == "warn" and COLOR_WARN or COLOR_BAD)
+    local c = MODE_COLORS[mode] or COLOR_BAD
     row.text:SetText(label)
     row.text:SetTextColor(GetClassColor(classToken))
     row.bg:SetColorTexture(c[1], c[2], c[3], mode == "warn" and 0.2 or 0.18)
@@ -905,25 +1014,42 @@ local function RefreshStatusWindow()
     local barWidth = statusWindow:GetWidth() - 16
     local rowIndex = 0
 
-    local function NextBarRow()
+    local function PlaceRow(row)
         rowIndex = rowIndex + 1
-        local row = GetBarRow(rowIndex)
         row:ClearAllPoints()
         row:SetPoint("TOPLEFT", 8, barTop - (rowIndex - 1) * (BAR_HEIGHT + BAR_GAP))
         row:SetWidth(barWidth)
         return row
     end
 
+    local shownUnits = {}
     for _, member in ipairs(snapshot.members) do
-        SetBarStatus(NextBarRow(), member.name:sub(1, 14), member.hasBuff and "ok" or "bad", member.class, member.buffIcon, member.otherBuffIcon)
+        local row = barRowsByUnit[member.unit]
+        if row then
+            shownUnits[member.unit] = true
+            local label, mode
+            if not member.online then
+                label = member.name:sub(1, 8) .. " (offline)"
+                mode = "offline"
+            elseif member.outOfRange then
+                label = member.name:sub(1, 8) .. " (out of range)"
+                mode = "offline"
+            else
+                label = member.name:sub(1, 14)
+                mode = member.hasBuff and "ok" or "bad"
+            end
+            SetBarStatus(PlaceRow(row), label, mode, member.class, member.buffIcon, member.otherBuffIcon)
+        end
+    end
+
+    for unit, row in pairs(barRowsByUnit) do
+        if not shownUnits[unit] then row:Hide() end
     end
 
     if snapshot.locked then
-        SetBarStatus(NextBarRow(), "(combat)", "warn")
-    end
-
-    for i = rowIndex + 1, #barRows do
-        barRows[i]:Hide()
+        SetBarStatus(PlaceRow(combatRow), "(combat)", "warn")
+    else
+        combatRow:Hide()
     end
 
     local totalHeight = (barTop * -1) + rowIndex * (BAR_HEIGHT + BAR_GAP) + 10
@@ -961,69 +1087,4 @@ statusWindowInit:SetScript("OnEvent", function()
     PaladinSealAlert_ApplyStatusWindowScale()
     PaladinSealAlert_RefreshStatusWindowVisibility()
 end)
-
--- ---------------------------------------------------------------------------
--- EXPERIMENTAL retest — Decursive's clickable unit buttons are built on
--- SecureUnitButtonTemplate (not SecureActionButtonTemplate, which is what
--- every earlier attempt here used) and set "macrotext" attributes directly
--- rather than referencing a saved macro by name. That's a real, untested
--- difference, worth checking before concluding click-casting is impossible
--- on this client. Bound to party1 only, for a quick in-game check.
--- ---------------------------------------------------------------------------
-
-local clickTestButton = CreateFrame("Button", "PaladinSealAlertClickTest", UIParent, "SecureUnitButtonTemplate, BackdropTemplate")
-clickTestButton:SetSize(90, 30)
-clickTestButton:SetPoint("CENTER", 0, 150)
-clickTestButton:SetFrameStrata("HIGH")
-clickTestButton:RegisterForClicks("AnyUp")
-clickTestButton:SetAttribute("unit", "party1")
-
-clickTestButton:SetAttribute("type1", "macro")
-clickTestButton:SetAttribute("macrotext1", "/cast [@party1] Blessing of Kings")
-clickTestButton:SetAttribute("ctrl-type1", "macro")
-clickTestButton:SetAttribute("ctrl-macrotext1", "/cast [@party1] Blessing of Might")
-clickTestButton:SetAttribute("shift-type1", "macro")
-clickTestButton:SetAttribute("shift-macrotext1", "/cast [@party1] Blessing of Wisdom")
-
-if clickTestButton.SetBackdrop then
-    clickTestButton:SetBackdrop({
-        bgFile = "Interface\\Buttons\\WHITE8x8",
-        edgeFile = "Interface\\Buttons\\WHITE8x8",
-        edgeSize = 1,
-    })
-    clickTestButton:SetBackdropColor(0.5, 0, 0, 0.8)
-    clickTestButton:SetBackdropBorderColor(1, 1, 0, 1)
-end
-
-local clickTestText = clickTestButton:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-clickTestText:SetPoint("CENTER")
-clickTestText:SetText("party1 test")
-
-clickTestButton:SetMovable(true)
-clickTestButton:EnableMouse(true)
-clickTestButton:RegisterForDrag("RightButton")
-clickTestButton:SetScript("OnDragStart", clickTestButton.StartMoving)
-clickTestButton:SetScript("OnDragStop", clickTestButton.StopMovingOrSizing)
-
-clickTestButton:SetScript("PostClick", function(self, button)
-    print("|cff3399ffSealkeeper test|r: click fired (" .. button .. "). Check your cast bar / combat log / party1's buffs for whether the spell actually went out.")
-end)
-
--- Standard for SecureUnitButtonTemplate buttons — ties the frame to whether
--- its "unit" attribute currently resolves to someone.
-pcall(RegisterUnitWatch, clickTestButton)
-
-clickTestButton:Hide()
-
-function PaladinSealAlert_ToggleClickTest()
-    if clickTestButton:IsShown() then
-        clickTestButton:Hide()
-    else
-        if not UnitExists("party1") then
-            print("|cff3399ffSealkeeper test|r: you need to be in a party (party1 must exist) for this test to mean anything.")
-        end
-        clickTestButton:Show()
-        print("|cff3399ffSealkeeper test|r: shown (SecureUnitButtonTemplate this time). Plain click = Kings, Ctrl+click = Might, Shift+click = Wisdom, target is party1. Right-click-drag to move it.")
-    end
-end
 
