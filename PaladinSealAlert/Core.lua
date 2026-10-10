@@ -470,6 +470,7 @@ local function PrintHelp()
     print("  /sealalert testgroup — test the group blessing alert")
     print("  /sealalert reset — reset to defaults")
     print("  /sealalert options — open the settings panel")
+    print("  /sealalert testclick — EXPERIMENTAL: toggle a party1 click-cast test button (SecureUnitButtonTemplate, see README)")
 end
 
 local function PrintStatus()
@@ -605,6 +606,12 @@ SlashCmdList["PALADINSEALALERT"] = function(input)
             db[key] = value
         end
         print(PREFIX .. "settings reset")
+    elseif cmd == "testclick" then
+        if PaladinSealAlert_ToggleClickTest then
+            PaladinSealAlert_ToggleClickTest()
+        else
+            print(PREFIX .. "click test unavailable")
+        end
     elseif cmd == "options" then
         if PaladinSealAlert_OpenOptions then
             PaladinSealAlert_OpenOptions()

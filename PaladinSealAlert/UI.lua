@@ -961,3 +961,68 @@ statusWindowInit:SetScript("OnEvent", function()
     PaladinSealAlert_RefreshStatusWindowVisibility()
 end)
 
+-- ---------------------------------------------------------------------------
+-- EXPERIMENTAL retest — Decursive's clickable unit buttons are built on
+-- SecureUnitButtonTemplate (not SecureActionButtonTemplate, which is what
+-- every earlier attempt here used) and set "macrotext" attributes directly
+-- rather than referencing a saved macro by name. That's a real, untested
+-- difference, worth checking before concluding click-casting is impossible
+-- on this client. Bound to party1 only, for a quick in-game check.
+-- ---------------------------------------------------------------------------
+
+local clickTestButton = CreateFrame("Button", "PaladinSealAlertClickTest", UIParent, "SecureUnitButtonTemplate, BackdropTemplate")
+clickTestButton:SetSize(90, 30)
+clickTestButton:SetPoint("CENTER", 0, 150)
+clickTestButton:SetFrameStrata("HIGH")
+clickTestButton:RegisterForClicks("AnyUp")
+clickTestButton:SetAttribute("unit", "party1")
+
+clickTestButton:SetAttribute("type1", "macro")
+clickTestButton:SetAttribute("macrotext1", "/cast [@party1] Blessing of Kings")
+clickTestButton:SetAttribute("ctrl-type1", "macro")
+clickTestButton:SetAttribute("ctrl-macrotext1", "/cast [@party1] Blessing of Might")
+clickTestButton:SetAttribute("shift-type1", "macro")
+clickTestButton:SetAttribute("shift-macrotext1", "/cast [@party1] Blessing of Wisdom")
+
+if clickTestButton.SetBackdrop then
+    clickTestButton:SetBackdrop({
+        bgFile = "Interface\\Buttons\\WHITE8x8",
+        edgeFile = "Interface\\Buttons\\WHITE8x8",
+        edgeSize = 1,
+    })
+    clickTestButton:SetBackdropColor(0.5, 0, 0, 0.8)
+    clickTestButton:SetBackdropBorderColor(1, 1, 0, 1)
+end
+
+local clickTestText = clickTestButton:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+clickTestText:SetPoint("CENTER")
+clickTestText:SetText("party1 test")
+
+clickTestButton:SetMovable(true)
+clickTestButton:EnableMouse(true)
+clickTestButton:RegisterForDrag("RightButton")
+clickTestButton:SetScript("OnDragStart", clickTestButton.StartMoving)
+clickTestButton:SetScript("OnDragStop", clickTestButton.StopMovingOrSizing)
+
+clickTestButton:SetScript("PostClick", function(self, button)
+    print("|cff3399ffSealkeeper test|r: click fired (" .. button .. "). Check your cast bar / combat log / party1's buffs for whether the spell actually went out.")
+end)
+
+-- Standard for SecureUnitButtonTemplate buttons — ties the frame to whether
+-- its "unit" attribute currently resolves to someone.
+pcall(RegisterUnitWatch, clickTestButton)
+
+clickTestButton:Hide()
+
+function PaladinSealAlert_ToggleClickTest()
+    if clickTestButton:IsShown() then
+        clickTestButton:Hide()
+    else
+        if not UnitExists("party1") then
+            print("|cff3399ffSealkeeper test|r: you need to be in a party (party1 must exist) for this test to mean anything.")
+        end
+        clickTestButton:Show()
+        print("|cff3399ffSealkeeper test|r: shown (SecureUnitButtonTemplate this time). Plain click = Kings, Ctrl+click = Might, Shift+click = Wisdom, target is party1. Right-click-drag to move it.")
+    end
+end
+
