@@ -2,6 +2,8 @@
 
 Stop staring at your buff bar. **Sealkeeper: Forever** is a Paladin addon built for chill, low-stress raiding and dungeon runs on **WoW: Forever** — it watches your Seal, Righteous Fury, and Aura for you, and keeps you honest about whether your party is actually getting your Blessing, so you can just play instead of babysitting timers.
 
+![Sealkeeper status window](docs/status-window.png)
+
 ## Features
 
 - **Seal / Righteous Fury / Aura alerts** — a popup banner and/or sound the instant one of these drops off, with an optional early warning a few seconds before it expires. Never get caught with a dead Seal mid-pull again.
