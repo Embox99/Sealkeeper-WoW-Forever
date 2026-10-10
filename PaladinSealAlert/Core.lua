@@ -470,7 +470,6 @@ local function PrintHelp()
     print("  /sealalert testgroup — test the group blessing alert")
     print("  /sealalert reset — reset to defaults")
     print("  /sealalert options — open the settings panel")
-    print("  /sealalert testclick — EXPERIMENTAL: toggle a party1 click-cast test button (re-checks a known client limitation, see README)")
 end
 
 local function PrintStatus()
@@ -509,10 +508,7 @@ local TOGGLE_COMMANDS = {
             if PaladinSealAlert_RefreshStatusWindowVisibility then PaladinSealAlert_RefreshStatusWindowVisibility() end
         end },
     icons = { dbKey = "statusIconLabels", label = "status window icon labels" },
-    lock = { dbKey = "statusWindowLocked", label = "status window lock",
-        onChange = function()
-            if PaladinSealAlert_RefreshLockButton then PaladinSealAlert_RefreshLockButton() end
-        end },
+    lock = { dbKey = "statusWindowLocked", label = "status window lock" },
 }
 
 local TEXT_COMMANDS = {
@@ -609,12 +605,6 @@ SlashCmdList["PALADINSEALALERT"] = function(input)
             db[key] = value
         end
         print(PREFIX .. "settings reset")
-    elseif cmd == "testclick" then
-        if PaladinSealAlert_ToggleClickTest then
-            PaladinSealAlert_ToggleClickTest()
-        else
-            print(PREFIX .. "click test unavailable")
-        end
     elseif cmd == "options" then
         if PaladinSealAlert_OpenOptions then
             PaladinSealAlert_OpenOptions()

@@ -403,10 +403,7 @@ local function BuildPanel()
 
     AddCheckbox(content, "Lock status window position", 20, y,
         function() return db.statusWindowLocked end,
-        function(v)
-            db.statusWindowLocked = v
-            if PaladinSealAlert_RefreshLockButton then PaladinSealAlert_RefreshLockButton() end
-        end)
+        function(v) db.statusWindowLocked = v end)
     y = y - 40
 
     -- ---- Seal / self alert sound ----
@@ -601,14 +598,6 @@ statusWindow:SetScript("OnDragStop", function(self)
     SaveStatusWindowPosition()
 end)
 
--- Right-click anywhere on the window (background, not the rows/badges) opens
--- the settings panel — a quicker path than digging through the Game menu.
-statusWindow:SetScript("OnMouseUp", function(self, button)
-    if button == "RightButton" and PaladinSealAlert_OpenOptions then
-        PaladinSealAlert_OpenOptions()
-    end
-end)
-
 local statusTitle = statusWindow:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 statusTitle:SetPoint("TOP", 0, -8)
 statusTitle:SetText("Sealkeeper")
@@ -621,23 +610,85 @@ closeButton:SetScript("OnClick", function()
     statusWindow:Hide()
 end)
 
--- ---- Lock toggle + quick resize buttons, in a small row under the title ----
+-- ---- Right-click context menu: lock/unlock position, open settings ----
 
-local lockButton = CreateFrame("Button", nil, statusWindow, "UIPanelButtonTemplate")
-lockButton:SetSize(50, 16)
-lockButton:SetPoint("TOPLEFT", 6, -22)
-lockButton:GetFontString():SetFontObject("GameFontHighlightSmall")
+local contextMenu = CreateFrame("Frame", nil, statusWindow, "BackdropTemplate")
+contextMenu:SetSize(130, 52)
+contextMenu:SetFrameStrata("TOOLTIP")
+if contextMenu.SetBackdrop then
+    contextMenu:SetBackdrop({
+        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        edgeSize = 12,
+        insets = { left = 3, right = 3, top = 3, bottom = 3 },
+    })
+    contextMenu:SetBackdropColor(0, 0, 0, 0.95)
+end
+contextMenu:Hide()
 
-function PaladinSealAlert_RefreshLockButton()
-    local db = PaladinSealAlertDB
-    lockButton:SetText(db and db.statusWindowLocked and "Locked" or "Unlocked")
+-- Catches a click anywhere else on screen to close the menu, since it's
+-- plain Frames/Buttons (not Blizzard's menu system — see the dropdown note
+-- in the options panel above for why).
+local menuCatcher = CreateFrame("Button", nil, UIParent)
+menuCatcher:SetAllPoints(UIParent)
+menuCatcher:SetFrameStrata("TOOLTIP")
+menuCatcher:Hide()
+contextMenu:SetFrameLevel(menuCatcher:GetFrameLevel() + 1)
+
+local function HideStatusContextMenu()
+    contextMenu:Hide()
+    menuCatcher:Hide()
+end
+menuCatcher:SetScript("OnClick", HideStatusContextMenu)
+
+local function AddMenuButton(index)
+    local btn = CreateFrame("Button", nil, contextMenu)
+    btn:SetSize(122, 20)
+    btn:SetPoint("TOP", 0, -4 - (index - 1) * 22)
+
+    local highlight = btn:CreateTexture(nil, "HIGHLIGHT")
+    highlight:SetAllPoints()
+    highlight:SetColorTexture(1, 1, 1, 0.15)
+    btn:SetHighlightTexture(highlight)
+
+    local text = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    text:SetPoint("LEFT", 4, 0)
+    btn.text = text
+    return btn
 end
 
-lockButton:SetScript("OnClick", function()
+local lockMenuItem = AddMenuButton(1)
+lockMenuItem:SetScript("OnClick", function()
     local db = PaladinSealAlertDB
-    if not db then return end
-    db.statusWindowLocked = not db.statusWindowLocked
-    PaladinSealAlert_RefreshLockButton()
+    if db then db.statusWindowLocked = not db.statusWindowLocked end
+    HideStatusContextMenu()
+end)
+
+local settingsMenuItem = AddMenuButton(2)
+settingsMenuItem.text:SetText("Settings...")
+settingsMenuItem:SetScript("OnClick", function()
+    if PaladinSealAlert_OpenOptions then PaladinSealAlert_OpenOptions() end
+    HideStatusContextMenu()
+end)
+
+local function ShowStatusContextMenu()
+    local db = PaladinSealAlertDB
+    lockMenuItem.text:SetText(db and db.statusWindowLocked and "Unlock position" or "Lock position")
+
+    local scale = UIParent:GetEffectiveScale()
+    local x, y = GetCursorPosition()
+    contextMenu:ClearAllPoints()
+    contextMenu:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", x / scale, y / scale)
+    contextMenu:Show()
+    menuCatcher:Show()
+end
+
+-- Right-click anywhere on the window (background, not the rows/badges) opens
+-- the context menu above.
+statusWindow:SetScript("OnMouseUp", function(self, button)
+    if button == "RightButton" then
+        ShowStatusContextMenu()
+    end
 end)
 
 local SCALE_STEP = 0.1
@@ -907,69 +958,6 @@ statusWindowInit:SetScript("OnEvent", function()
         statusWindow:SetPoint(db.statusWindowPoint, UIParent, db.statusWindowRelPoint or db.statusWindowPoint, db.statusWindowX, db.statusWindowY)
     end
     PaladinSealAlert_ApplyStatusWindowScale()
-    PaladinSealAlert_RefreshLockButton()
     PaladinSealAlert_RefreshStatusWindowVisibility()
 end)
-
--- ---------------------------------------------------------------------------
--- EXPERIMENTAL — re-checking a known client limitation, not a real feature.
--- Click-casting via SecureActionButtonTemplate was tested extensively before
--- (type=target+unit, type=macro, inline macrotext, RunMacro()) and none of
--- it executed on this beta client — proven with PostClick logging showing
--- the action never actually fired. This is one more isolated test, this
--- time with modifier-keyed spell attributes bound straight to party1
--- (skipping macros and @mouseover entirely, since our rows aren't real
--- unit frames). If the client's been patched since, this is how we'd see it.
--- ---------------------------------------------------------------------------
-
-local clickTestButton = CreateFrame("Button", "PaladinSealAlertClickTest", UIParent, "SecureActionButtonTemplate, BackdropTemplate")
-clickTestButton:SetSize(90, 30)
-clickTestButton:SetPoint("CENTER", 0, 150)
-clickTestButton:SetFrameStrata("HIGH")
-clickTestButton:RegisterForClicks("AnyUp", "AnyDown")
-clickTestButton:SetAttribute("unit", "party1")
-clickTestButton:SetAttribute("type1", "spell")
-clickTestButton:SetAttribute("spell1", "Blessing of Kings")
-clickTestButton:SetAttribute("ctrl-type1", "spell")
-clickTestButton:SetAttribute("ctrl-spell1", "Blessing of Might")
-clickTestButton:SetAttribute("shift-type1", "spell")
-clickTestButton:SetAttribute("shift-spell1", "Blessing of Wisdom")
-
-if clickTestButton.SetBackdrop then
-    clickTestButton:SetBackdrop({
-        bgFile = "Interface\\Buttons\\WHITE8x8",
-        edgeFile = "Interface\\Buttons\\WHITE8x8",
-        edgeSize = 1,
-    })
-    clickTestButton:SetBackdropColor(0.5, 0, 0, 0.8)
-    clickTestButton:SetBackdropBorderColor(1, 1, 0, 1)
-end
-
-local clickTestText = clickTestButton:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-clickTestText:SetPoint("CENTER")
-clickTestText:SetText("party1 test")
-
-clickTestButton:SetMovable(true)
-clickTestButton:EnableMouse(true)
-clickTestButton:RegisterForDrag("RightButton")
-clickTestButton:SetScript("OnDragStart", clickTestButton.StartMoving)
-clickTestButton:SetScript("OnDragStop", clickTestButton.StopMovingOrSizing)
-
-clickTestButton:SetScript("PostClick", function(self, button)
-    print("|cff3399ffSealkeeper test|r: click fired (" .. button .. "). Check your cast bar / combat log / party1's buffs for whether the spell actually went out.")
-end)
-
-clickTestButton:Hide()
-
-function PaladinSealAlert_ToggleClickTest()
-    if clickTestButton:IsShown() then
-        clickTestButton:Hide()
-    else
-        if not UnitExists("party1") then
-            print("|cff3399ffSealkeeper test|r: you need to be in a party (party1 must exist) for this test to mean anything.")
-        end
-        clickTestButton:Show()
-        print("|cff3399ffSealkeeper test|r: shown. Plain click = Kings, Ctrl+click = Might, Shift+click = Wisdom, target is party1. Right-click-drag to move it.")
-    end
-end
 
