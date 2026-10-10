@@ -594,7 +594,12 @@ statusWindow:EnableMouse(true)
 statusWindow:RegisterForDrag("LeftButton")
 statusWindow:SetClampedToScreen(true)
 
-if statusWindow.SetBackdrop then
+-- Re-invoked after every resize below — on this client the backdrop border
+-- can visibly lag a frame's actual size after SetSize/SetHeight (the last
+-- row sticking out past the border instead of being enclosed by it), so we
+-- force it to redraw against the current dimensions every time.
+local function ApplyStatusWindowBackdrop()
+    if not statusWindow.SetBackdrop then return end
     statusWindow:SetBackdrop({
         bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
         edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
@@ -603,6 +608,7 @@ if statusWindow.SetBackdrop then
     })
     statusWindow:SetBackdropColor(0, 0, 0, 0.6)
 end
+ApplyStatusWindowBackdrop()
 
 local function SaveStatusWindowPosition()
     local db = PaladinSealAlertDB
@@ -946,9 +952,12 @@ end
 
 -- Not tied to a real unit, so it's a plain (non-secure) Button — still a
 -- Button, not a Frame, since AddBarVisuals' highlight texture needs one.
+-- Shorter than a regular row — it's just a placeholder note, not a member.
+local COMBAT_ROW_HEIGHT = 14
 local combatRow = CreateFrame("Button", nil, statusWindow)
-combatRow:SetHeight(BAR_HEIGHT)
+combatRow:SetHeight(COMBAT_ROW_HEIGHT)
 AddBarVisuals(combatRow)
+pcall(function() combatRow.text:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE") end)
 combatRow:SetScript("OnMouseUp", OnRightClickOpenMenu)
 
 local function GetClassColor(classToken)
@@ -1052,8 +1061,16 @@ local function RefreshStatusWindow()
         combatRow:Hide()
     end
 
-    local totalHeight = (barTop * -1) + rowIndex * (BAR_HEIGHT + BAR_GAP) + 10
-    statusWindow:SetHeight(math.max(70, totalHeight))
+    -- SetHeight alone can leave the backdrop border a tick behind the new
+    -- row count on this client (the combat row visibly sticking out past
+    -- the bottom edge) — SetSize forces a full redraw, plus some extra
+    -- bottom padding as a safety margin.
+    -- Small bottom margin — the exact formula wasn't quite enough to keep
+    -- the last row from visually sticking out past the border, so this
+    -- pads a bit past where the math alone says it needs to.
+    local totalHeight = (barTop * -1) + rowIndex * (BAR_HEIGHT + BAR_GAP) + 22
+    statusWindow:SetSize(statusWindow:GetWidth(), math.max(70, totalHeight))
+    ApplyStatusWindowBackdrop()
 end
 
 C_Timer.NewTicker(0.5, RefreshStatusWindow)
