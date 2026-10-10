@@ -743,9 +743,10 @@ local function CreateBadge(label)
     badge.text = text
 
     -- Alternate to the text label when icon mode is on (see SetBadgeStatus).
+    -- Square and centered, not stretched to the (wider-than-tall) badge.
     local icon = badge:CreateTexture(nil, "ARTWORK")
-    icon:SetPoint("TOPLEFT", 3, -3)
-    icon:SetPoint("BOTTOMRIGHT", -3, 3)
+    icon:SetSize(BADGE_HEIGHT - 6, BADGE_HEIGHT - 6)
+    icon:SetPoint("CENTER")
     icon:SetTexCoord(0.08, 0.92, 0.08, 0.92) -- trim the icon's built-in border art
     icon:Hide()
     badge.icon = icon
