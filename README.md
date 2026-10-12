@@ -12,8 +12,10 @@ Stop staring at your buff bar. **Sealkeeper: Forever** is a Paladin addon built 
   - **Your own Blessing icon on the left** of the name, **another paladin's Blessing icon on the right** — at a glance you can tell if someone's covered, and by whom.
   - Rows turn green when the player has your Blessing, red when they don't, and grey with an **"(offline)"** or **"(out of range)"** label when you can't reach them.
   - **Click a row to cast a Blessing on that member directly** — plain click = Blessing of Kings, Ctrl-click = Might, Shift-click = Wisdom by default, and each one is reassignable in the settings panel. No targeting, no macros to set up yourself, and it never misfires onto your current target or yourself.
-  - Drag it anywhere, or right-click for a quick menu: resize, lock the window in place, or jump to the full settings panel.
-- **Fully configurable** — pick your own sounds (built-in presets or a custom file), colors, text size, and messages for every alert, all from an in-game settings panel (slash commands work too, if you prefer those).
+  - Drag it anywhere, or right-click for a quick menu: resize, lock the window in place, hide it, or jump to the full settings panel.
+  - Optional minimal look — hide the title and close button, just the badges and rows.
+- **Fully configurable** — pick your own sounds (built-in presets or a custom file), per-alert volume, colors, text size, and messages for every alert, all from an in-game settings panel (slash commands work too, if you prefer those).
+- **Alert throttle** — a minimum gap between repeat alerts for the same buff, so a flickering connection doesn't turn one dropped Seal into a sound-spam.
 - **Class-colored names** — party rows are colored by class so your raid frames and the status window always agree at a glance.
 
 ## Installation

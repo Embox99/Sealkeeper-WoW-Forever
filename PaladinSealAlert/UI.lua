@@ -294,9 +294,9 @@ local function AddColorSizeControls(parent, x, y, colorKeyPrefix, sizeKey, label
     return y - 130 -- next free y
 end
 
--- Preset + channel + custom file + beta-bug warning, shared by the seal and
--- group alert sections instead of copy-pasting each block twice.
-local function AddSoundControls(y, presetKey, channelKey, fileKey)
+-- Preset + channel + volume + custom file + beta-bug warning, shared by
+-- the seal and group alert sections instead of copy-pasting each block.
+local function AddSoundControls(y, presetKey, channelKey, fileKey, volumeKey)
     local db = PaladinSealAlertDB
 
     local presetButton = AddDropdown(content, "Sound preset:", 20, y, 170,
@@ -308,6 +308,11 @@ local function AddSoundControls(y, presetKey, channelKey, fileKey)
         function() return db[channelKey] end,
         function(v) db[channelKey] = v end)
     y = y - 56
+
+    AddSlider(content, "Volume", 20, y, 0, 100, 5,
+        function() return db[volumeKey] end,
+        function(v) db[volumeKey] = v end)
+    y = y - 50
 
     AddEditBox(content, "Custom sound (filename in Sounds folder, or full Interface\\... path):", 20, y, 400,
         function() return db[fileKey] end,
@@ -404,6 +409,14 @@ local function BuildPanel()
     AddCheckbox(content, "Lock status window position", 20, y,
         function() return db.statusWindowLocked end,
         function(v) db.statusWindowLocked = v end)
+    y = y - 26
+
+    AddCheckbox(content, "Minimal look (hide title and close button)", 20, y,
+        function() return db.statusWindowMinimal end,
+        function(v)
+            db.statusWindowMinimal = v
+            if PaladinSealAlert_ApplyStatusWindowChrome then PaladinSealAlert_ApplyStatusWindowChrome() end
+        end)
     y = y - 40
 
     local blessingTitle = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -438,7 +451,7 @@ local function BuildPanel()
     sealSoundTitle:SetText("Seal / Righteous Fury Alert")
     y = y - 30
 
-    y = AddSoundControls(y, "soundPreset", "soundChannel", "customSoundFile")
+    y = AddSoundControls(y, "soundPreset", "soundChannel", "customSoundFile", "soundVolume")
 
     AddSlider(content, "Warn early (sec, 0 = off)", 20, y, 0, 10, 1,
         function() return db.warnBeforeSeconds end,
@@ -446,6 +459,11 @@ local function BuildPanel()
     AddSlider(content, "Popup duration (sec)", 300, y, 1, 8, 1,
         function() return db.popupDuration end,
         function(v) db.popupDuration = v end)
+    y = y - 50
+
+    AddSlider(content, "Alert throttle (sec, 0 = off) — guards against lag-flicker spam", 20, y, 0, 5, 0.5,
+        function() return db.alertThrottleSeconds end,
+        function(v) db.alertThrottleSeconds = v end)
     y = y - 50
 
     y = AddColorSizeControls(content, 20, y, "textColor", "textSize", "Popup color & size:")
@@ -499,7 +517,7 @@ local function BuildPanel()
         function(v) db.enableGroupBlessingWatch = v end)
     y = y - 40
 
-    y = AddSoundControls(y, "groupSoundPreset", "groupSoundChannel", "groupCustomSoundFile")
+    y = AddSoundControls(y, "groupSoundPreset", "groupSoundChannel", "groupCustomSoundFile", "groupSoundVolume")
 
     y = AddColorSizeControls(content, 20, y, "groupTextColor", "groupTextSize", "Group popup color & size:")
 
@@ -634,13 +652,32 @@ local statusTitle = statusWindow:CreateFontString(nil, "OVERLAY", "GameFontNorma
 statusTitle:SetPoint("TOP", 0, -8)
 statusTitle:SetText("Sealkeeper")
 
+local function HideStatusWindow()
+    PaladinSealAlertDB.showStatusWindow = false
+    statusWindow:Hide()
+end
+
 local closeButton = CreateFrame("Button", nil, statusWindow, "UIPanelCloseButton")
 closeButton:SetPoint("TOPRIGHT", -2, -2)
 closeButton:SetSize(20, 20)
-closeButton:SetScript("OnClick", function()
-    PaladinSealAlertDB.showStatusWindow = false
-    statusWindow:Hide()
-end)
+closeButton:SetScript("OnClick", HideStatusWindow)
+
+-- Minimal mode hides the title/close button entirely (toggled in Settings
+-- or from the right-click menu's "Hide" item, since the close button won't
+-- be there to click).
+function PaladinSealAlert_ApplyStatusWindowChrome()
+    local db = PaladinSealAlertDB
+    local minimal = db and db.statusWindowMinimal
+    statusTitle:SetShown(not minimal)
+    closeButton:SetShown(not minimal)
+end
+
+-- Badges sit right under the title normally, but climb up to fill the gap
+-- when the title's hidden.
+local function GetBadgeY()
+    local db = PaladinSealAlertDB
+    return (db and db.statusWindowMinimal) and -8 or -26
+end
 
 -- ---- Right-click context menu: size, lock/unlock, advanced settings ----
 
@@ -654,7 +691,7 @@ local function NudgeStatusWindowScale(delta)
 end
 
 local contextMenu = CreateFrame("Frame", nil, statusWindow, "BackdropTemplate")
-contextMenu:SetSize(130, 96)
+contextMenu:SetSize(130, 118)
 contextMenu:SetFrameStrata("TOOLTIP")
 contextMenu:SetClampedToScreen(true)
 if contextMenu.SetBackdrop then
@@ -721,6 +758,13 @@ settingsMenuItem:SetScript("OnClick", function()
     HideStatusContextMenu()
 end)
 
+local hideMenuItem = AddMenuButton(5)
+hideMenuItem.text:SetText("Hide")
+hideMenuItem:SetScript("OnClick", function()
+    HideStatusContextMenu()
+    HideStatusWindow()
+end)
+
 local function ShowStatusContextMenu()
     local db = PaladinSealAlertDB
     lockMenuItem.text:SetText(db and db.statusWindowLocked and "Unlock position" or "Lock position")
@@ -752,7 +796,7 @@ local COLOR_OFFLINE = { 0.55, 0.55, 0.55 }
 
 -- ---- Top row: 3 small badges for Seal / Righteous Fury / Aura ----
 
-local BADGE_WIDTH, BADGE_HEIGHT, BADGE_GAP, BADGE_Y = 48, 30, 4, -26
+local BADGE_WIDTH, BADGE_HEIGHT, BADGE_GAP = 48, 30, 4
 
 local RF_ICON = "Interface\\Icons\\Spell_Holy_SealOfFury"
 local DEFAULT_SEAL_ICON = "Interface\\Icons\\Spell_Holy_SealOfWrath"
@@ -812,9 +856,10 @@ end
 
 local function LayoutBadges(visibleBadges)
     local x = 8
+    local badgeY = GetBadgeY()
     for _, badge in ipairs(visibleBadges) do
         badge:ClearAllPoints()
-        badge:SetPoint("TOPLEFT", x, BADGE_Y)
+        badge:SetPoint("TOPLEFT", x, badgeY)
         x = x + BADGE_WIDTH + BADGE_GAP
     end
 end
@@ -1019,7 +1064,7 @@ local function RefreshStatusWindow()
 
     LayoutBadges(visibleBadges)
 
-    local barTop = BADGE_Y - BADGE_HEIGHT - 10
+    local barTop = GetBadgeY() - BADGE_HEIGHT - 10
     local barWidth = statusWindow:GetWidth() - 16
     local rowIndex = 0
 
@@ -1102,6 +1147,7 @@ statusWindowInit:SetScript("OnEvent", function()
         statusWindow:SetPoint(db.statusWindowPoint, UIParent, db.statusWindowRelPoint or db.statusWindowPoint, db.statusWindowX, db.statusWindowY)
     end
     PaladinSealAlert_ApplyStatusWindowScale()
+    PaladinSealAlert_ApplyStatusWindowChrome()
     PaladinSealAlert_RefreshStatusWindowVisibility()
 end)
 

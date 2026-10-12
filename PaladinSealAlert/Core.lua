@@ -29,11 +29,13 @@ local defaults = {
     soundPreset = "raidwarning",   -- "raidwarning" | "readycheck" | "alarm" | "custom"
     customSoundFile = "",          -- filename inside Sounds\ folder, or a full "Interface\..." path
     warnBeforeSeconds = 3,         -- seconds of remaining duration to fire an early warning; 0 disables it
+    alertThrottleSeconds = 2,      -- minimum gap between repeat alerts for the same buff (guards against lag-flicker spam)
     popupDuration = 3,             -- how long the popup stays on screen
     msgExpired = "SEAL EXPIRED",
     msgWarning = "Seal expiring",
     debug = false,
     soundChannel = "Master",       -- "Master" | "SFX" | "Ambience" | "Music" | "Dialog"
+    soundVolume = 100,             -- 0-100, relative to that channel's own volume setting
     textColorR = 1,
     textColorG = 0.15,
     textColorB = 0.15,
@@ -49,12 +51,14 @@ local defaults = {
     groupSoundPreset = "readycheck", -- "raidwarning" | "readycheck" | "alarm" | "custom"
     groupCustomSoundFile = "",
     groupSoundChannel = "Master",
+    groupSoundVolume = 100,        -- 0-100, relative to that channel's own volume setting
     enableRighteousFuryWatch = true,
     msgRFExpired = "RIGHTEOUS FURY EXPIRED",
     msgRFWarning = "Righteous Fury expiring",
     showStatusWindow = true,
     statusWindowScale = 1.0,
     statusWindowLocked = false,
+    statusWindowMinimal = false,   -- hide the title bar and close button
     statusIconLabels = true,       -- show icon textures instead of "Seal"/"RF"/"Aura" text on the badges
     blessingPlainKey = "kings",    -- which Blessing each click type casts on a party row — see BLESSING_SPELLS below
     blessingCtrlKey = "might",
@@ -107,10 +111,38 @@ local SOUND_PRESET_ORDER = { "raidwarning", "readycheck", "alarm", "custom" }
 -- group blessing alert) — playback and slash commands both read this table.
 local SOUND_TARGETS = {
     sound = { presetKey = "soundPreset", fileKey = "customSoundFile", channelKey = "soundChannel",
-        tag = "seal", label = "sound", fileMessage = "custom sound set: " },
+        volumeKey = "soundVolume", tag = "seal", label = "sound", fileMessage = "custom sound set: " },
     groupsound = { presetKey = "groupSoundPreset", fileKey = "groupCustomSoundFile", channelKey = "groupSoundChannel",
-        tag = "group", label = "group sound", fileMessage = "group custom sound set: " },
+        volumeKey = "groupSoundVolume", tag = "group", label = "group sound", fileMessage = "group custom sound set: " },
 }
+
+-- There's no per-call volume on PlaySound/PlaySoundFile — the standard
+-- workaround (same one most alert-sound addons use) is to nudge the
+-- channel's own volume cvar for the duration of the sound, then put it
+-- back. volumePercent 100 skips all of this and just plays normally.
+local CHANNEL_CVARS = {
+    Master   = "Sound_MasterVolume",
+    SFX      = "Sound_SFXVolume",
+    Ambience = "Sound_AmbienceVolume",
+    Music    = "Sound_MusicVolume",
+    Dialog   = "Sound_DialogVolume",
+}
+
+local function PlayAtVolume(channel, volumePercent, playFunc)
+    volumePercent = volumePercent or 100
+    local cvarName = CHANNEL_CVARS[channel]
+    if not cvarName or volumePercent >= 100 then
+        return playFunc()
+    end
+
+    local original = tonumber(GetCVar(cvarName))
+    local ok = pcall(SetCVar, cvarName, (original or 1) * (volumePercent / 100))
+    local willPlay, handle = playFunc()
+    if ok and original then
+        C_Timer.After(2.5, function() pcall(SetCVar, cvarName, original) end)
+    end
+    return willPlay, handle
+end
 
 local function PlayConfiguredSound(isGroup)
     local db = PaladinSealAlertDB
@@ -119,13 +151,16 @@ local function PlayConfiguredSound(isGroup)
     local preset = db[target.presetKey]
     local customFile = db[target.fileKey]
     local channel = db[target.channelKey]
+    local volume = db[target.volumeKey]
 
     if preset == "custom" and customFile ~= "" then
         local path = customFile
         if not path:lower():find("^interface") then
             path = "Interface\\AddOns\\" .. ADDON_FOLDER .. "\\Sounds\\" .. path
         end
-        local willPlay, handle = PlaySoundFile(path, channel)
+        local willPlay, handle = PlayAtVolume(channel, volume, function()
+            return PlaySoundFile(path, channel)
+        end)
         if db.debug then
             print(PREFIX .. "[" .. tag .. "] PlaySoundFile(\"" .. path .. "\", \"" .. channel .. "\") -> willPlay=" .. tostring(willPlay) .. " handle=" .. tostring(handle))
         end
@@ -134,7 +169,9 @@ local function PlayConfiguredSound(isGroup)
         end
     else
         local kitID = SOUND_PRESETS[preset] or SOUND_PRESETS.raidwarning
-        local willPlay, handle = PlaySound(kitID, channel, true)
+        local willPlay, handle = PlayAtVolume(channel, volume, function()
+            return PlaySound(kitID, channel, true)
+        end)
         if db.debug then
             print(PREFIX .. "[" .. tag .. "] PlaySound preset=" .. preset .. " kitID=" .. tostring(kitID)
                 .. " named=" .. tostring(SOUND_PRESET_NAMED[preset])
@@ -284,6 +321,20 @@ end
 -- buffs (seal/RF/Aura) and for each party member's Blessing.
 -- ---------------------------------------------------------------------------
 
+-- Guards against alert spam when a buff flickers (lag causing the aura scan
+-- to briefly see it drop and reappear) — won't fire the same kind of alert
+-- for this state twice within alertThrottleSeconds.
+local function PassesThrottle(state, fieldKey)
+    local db = PaladinSealAlertDB
+    local throttle = (db and db.alertThrottleSeconds) or 0
+    local now = GetTime()
+    if throttle > 0 and state[fieldKey] and (now - state[fieldKey]) < throttle then
+        return false
+    end
+    state[fieldKey] = now
+    return true
+end
+
 local function UpdateBuffState(state, aura, warnBeforeSeconds, onWarning, onExpired)
     if aura then
         local signature = aura.name .. tostring(aura.expirationTime)
@@ -298,11 +349,13 @@ local function UpdateBuffState(state, aura, warnBeforeSeconds, onWarning, onExpi
             local remaining = aura.expirationTime - GetTime()
             if remaining > 0 and remaining <= warnBeforeSeconds then
                 state.warned = true
-                onWarning()
+                if PassesThrottle(state, "lastWarnAlert") then
+                    onWarning()
+                end
             end
         end
     else
-        if state.has then
+        if state.has and PassesThrottle(state, "lastExpireAlert") then
             onExpired()
         end
         state.has = false
@@ -464,13 +517,16 @@ local function PrintHelp()
     print("  /sealalert sound preset raidwarning|readycheck|alarm — pick a built-in sound")
     print("  /sealalert sound file <filename.ogg> — custom sound from the addon's Sounds folder (or a full Interface\\... path)")
     print("  /sealalert warn <seconds> — warn N seconds before the seal expires (0 disables it)")
+    print("  /sealalert throttle <seconds> — minimum gap between repeat alerts for the same buff (0 disables it)")
     print("  /sealalert duration <seconds> — how long the popup stays on screen")
     print("  /sealalert text expired <text> — message shown when the seal is gone")
     print("  /sealalert text warning <text> — early-warning message")
     print("  /sealalert channel <Master|SFX|Ambience|Music|Dialog> — change the sound channel")
+    print("  /sealalert sound volume <0-100> — seal/RF/Aura alert volume")
     print("  /sealalert groupsound preset raidwarning|readycheck|alarm — sound for group blessing alerts")
     print("  /sealalert groupsound file <filename.ogg> — custom sound for group blessing alerts")
     print("  /sealalert groupsound channel <Master|SFX|Ambience|Music|Dialog> — channel for group blessing alerts")
+    print("  /sealalert groupsound volume <0-100> — group blessing alert volume")
     print("  /sealalert debug on|off — print diagnostic info when playing sounds")
     print("  /sealalert rf on|off — toggle watching Righteous Fury")
     print("  /sealalert rftext expired|warning <text> — Righteous Fury alert text")
@@ -483,6 +539,7 @@ local function PrintHelp()
     print("  /sealalert scale <0.6-1.6> — resize the status window")
     print("  /sealalert icons on|off — show icons instead of text labels on the status window badges")
     print("  /sealalert lock on|off — lock the status window in place (stops accidental dragging)")
+    print("  /sealalert minimal on|off — hide the status window's title and close button")
     print("  /sealalert blessing click|ctrl|shift kings|might|wisdom — set which Blessing each click type casts on a party row")
     print("  /sealalert status — show current settings")
     print("  /sealalert test — test the seal alert")
@@ -495,10 +552,12 @@ local function PrintStatus()
     local db = PaladinSealAlertDB
     print(PREFIX .. "current settings:")
     print("  sound: " .. (db.enableSound and "on" or "off") .. ", channel: " .. db.soundChannel ..
+        ", volume: " .. db.soundVolume .. "%" ..
         ", preset: " .. db.soundPreset ..
         (db.soundPreset == "custom" and (" (" .. db.customSoundFile .. ")") or ""))
     print("  popup: " .. (db.enablePopup and "on" or "off") .. ", duration: " .. db.popupDuration .. "s")
     print("  early warning: " .. db.warnBeforeSeconds .. "s before expiry")
+    print("  alert throttle: " .. db.alertThrottleSeconds .. "s")
     print("  text (expired): " .. db.msgExpired)
     print("  text (warning): " .. db.msgWarning)
     print("  status window: " .. (db.showStatusWindow and "on" or "off") ..
@@ -529,6 +588,10 @@ local TOGGLE_COMMANDS = {
         end },
     icons = { dbKey = "statusIconLabels", label = "status window icon labels" },
     lock = { dbKey = "statusWindowLocked", label = "status window lock" },
+    minimal = { dbKey = "statusWindowMinimal", label = "status window minimal look",
+        onChange = function()
+            if PaladinSealAlert_ApplyStatusWindowChrome then PaladinSealAlert_ApplyStatusWindowChrome() end
+        end },
 }
 
 local TEXT_COMMANDS = {
@@ -581,6 +644,12 @@ SlashCmdList["PALADINSEALALERT"] = function(input)
     elseif soundTarget and sub == "channel" and args[3] then
         db[soundTarget.channelKey] = args[3]
         print(PREFIX .. soundTarget.label .. " channel: " .. args[3])
+    elseif soundTarget and sub == "volume" and args[3] then
+        local volume = tonumber(args[3])
+        if volume then
+            db[soundTarget.volumeKey] = math.max(0, math.min(100, volume))
+            print(PREFIX .. soundTarget.label .. " volume: " .. db[soundTarget.volumeKey] .. "%")
+        end
     elseif textCmd and sub == "expired" and args[3] then
         db[textCmd.expiredKey] = table.concat(args, " ", 3)
         print(PREFIX .. textCmd.label .. "expired text updated")
@@ -602,6 +671,12 @@ SlashCmdList["PALADINSEALALERT"] = function(input)
         if seconds then
             db.popupDuration = seconds
             print(PREFIX .. "popup duration: " .. seconds .. "s")
+        end
+    elseif cmd == "throttle" and args[2] then
+        local seconds = tonumber(args[2])
+        if seconds then
+            db.alertThrottleSeconds = seconds
+            print(PREFIX .. "alert throttle: " .. seconds .. "s")
         end
     elseif cmd == "scale" and args[2] then
         local scale = tonumber(args[2])
