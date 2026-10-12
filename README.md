@@ -1,5 +1,7 @@
 # Sealkeeper: Forever
 
+**[Available on CurseForge](https://www.curseforge.com/wow/addons/sealkeeper)**
+
 Stop staring at your buff bar. **Sealkeeper: Forever** is a Paladin addon built for chill, low-stress raiding and dungeon runs on **WoW: Forever** — it watches your Seal, Righteous Fury, and Aura for you, and keeps you honest about whether your party is actually getting your Blessing, so you can just play instead of babysitting timers.
 
 ![Sealkeeper status window](docs/status-window.png)
