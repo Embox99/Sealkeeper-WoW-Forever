@@ -169,8 +169,12 @@ end
 local SOUND_PRESET_LABELS = {
     raidwarning = "Raid Warning",
     readycheck  = "Ready Check",
-    alarm       = "Alarm Clock",
-    custom      = "Custom File",
+    alarm       = "Alarm Clock 3",
+    alarm2      = "Alarm Clock 2",
+    alarm1      = "Alarm Clock 1",
+    whisper     = "Whisper Ding",
+    pvpqueue    = "PvP Queue Pop",
+    epicloot    = "Epic Loot Toast",
 }
 
 local CHANNELS = { "Master", "SFX", "Ambience", "Music", "Dialog" }
@@ -294,12 +298,14 @@ local function AddColorSizeControls(parent, x, y, colorKeyPrefix, sizeKey, label
     return y - 130 -- next free y
 end
 
--- Preset + channel + volume + custom file + beta-bug warning, shared by
--- the seal and group alert sections instead of copy-pasting each block.
-local function AddSoundControls(y, presetKey, channelKey, fileKey, volumeKey)
+-- Preset + channel + volume, shared by the seal and group alert sections
+-- instead of copy-pasting each block. Presets are all built-in game sounds
+-- (SOUNDKIT) — external audio files aren't supported, since PlaySoundFile
+-- on a real external file is silently broken on this beta client.
+local function AddSoundControls(y, presetKey, channelKey, volumeKey)
     local db = PaladinSealAlertDB
 
-    local presetButton = AddDropdown(content, "Sound preset:", 20, y, 170,
+    AddDropdown(content, "Sound preset:", 20, y, 190,
         PaladinSealAlert_SoundPresetOrder, SOUND_PRESET_LABELS,
         function() return db[presetKey] end,
         function(v) db[presetKey] = v end)
@@ -313,28 +319,6 @@ local function AddSoundControls(y, presetKey, channelKey, fileKey, volumeKey)
         function() return db[volumeKey] end,
         function(v) db[volumeKey] = v end)
     y = y - 50
-
-    AddEditBox(content, "Custom sound (filename in Sounds folder, or full Interface\\... path):", 20, y, 400,
-        function() return db[fileKey] end,
-        function(v)
-            db[fileKey] = v
-            -- Typing a custom file only has an effect once the preset is
-            -- actually switched to "custom" — do that automatically so the
-            -- box and the button label can't fall out of sync.
-            if v ~= "" then
-                db[presetKey] = "custom"
-                presetButton.Refresh()
-            end
-        end)
-    y = y - 42
-
-    local warning = content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    warning:SetPoint("TOPLEFT", 20, y)
-    warning:SetWidth(660)
-    warning:SetJustifyH("LEFT")
-    warning:SetText("Known WoW: Forever beta bug — custom sound files are currently silent. Built-in presets work.")
-    warning:SetTextColor(1, 0.6, 0.1)
-    y = y - 30
 
     return y
 end
@@ -451,7 +435,7 @@ local function BuildPanel()
     sealSoundTitle:SetText("Seal / Righteous Fury Alert")
     y = y - 30
 
-    y = AddSoundControls(y, "soundPreset", "soundChannel", "customSoundFile", "soundVolume")
+    y = AddSoundControls(y, "soundPreset", "soundChannel", "soundVolume")
 
     AddSlider(content, "Warn early (sec, 0 = off)", 20, y, 0, 10, 1,
         function() return db.warnBeforeSeconds end,
@@ -517,7 +501,7 @@ local function BuildPanel()
         function(v) db.enableGroupBlessingWatch = v end)
     y = y - 40
 
-    y = AddSoundControls(y, "groupSoundPreset", "groupSoundChannel", "groupCustomSoundFile", "groupSoundVolume")
+    y = AddSoundControls(y, "groupSoundPreset", "groupSoundChannel", "groupSoundVolume")
 
     y = AddColorSizeControls(content, 20, y, "groupTextColor", "groupTextSize", "Group popup color & size:")
 
@@ -691,7 +675,7 @@ local function NudgeStatusWindowScale(delta)
 end
 
 local contextMenu = CreateFrame("Frame", nil, statusWindow, "BackdropTemplate")
-contextMenu:SetSize(130, 118)
+contextMenu:SetSize(130, 140)
 contextMenu:SetFrameStrata("TOOLTIP")
 contextMenu:SetClampedToScreen(true)
 if contextMenu.SetBackdrop then
@@ -765,9 +749,18 @@ hideMenuItem:SetScript("OnClick", function()
     HideStatusWindow()
 end)
 
+local minimalMenuItem = AddMenuButton(6)
+minimalMenuItem:SetScript("OnClick", function()
+    local db = PaladinSealAlertDB
+    if db then db.statusWindowMinimal = not db.statusWindowMinimal end
+    if PaladinSealAlert_ApplyStatusWindowChrome then PaladinSealAlert_ApplyStatusWindowChrome() end
+    HideStatusContextMenu()
+end)
+
 local function ShowStatusContextMenu()
     local db = PaladinSealAlertDB
     lockMenuItem.text:SetText(db and db.statusWindowLocked and "Unlock position" or "Lock position")
+    minimalMenuItem.text:SetText(db and db.statusWindowMinimal and "Normal look" or "Minimal look")
 
     -- Anchored to the window itself (which is already clamped to the
     -- screen) instead of the cursor, so it can't end up off-screen when the

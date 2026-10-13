@@ -1,7 +1,5 @@
 -- PaladinSealAlert: core logic (aura scanning, alert triggering, saved settings, slash commands)
 
-local ADDON_FOLDER = "PaladinSealAlert"
-
 local PREFIX = "|cff3399ffSealkeeper|r: "
 
 -- Which Blessing each click type on a status window row casts — keyed so
@@ -26,8 +24,7 @@ local BLESSING_CLICK_DB_KEYS = {
 local defaults = {
     enablePopup = true,
     enableSound = true,
-    soundPreset = "raidwarning",   -- "raidwarning" | "readycheck" | "alarm" | "custom"
-    customSoundFile = "",          -- filename inside Sounds\ folder, or a full "Interface\..." path
+    soundPreset = "raidwarning",   -- see SOUND_PRESET_ORDER below
     warnBeforeSeconds = 3,         -- seconds of remaining duration to fire an early warning; 0 disables it
     alertThrottleSeconds = 2,      -- minimum gap between repeat alerts for the same buff (guards against lag-flicker spam)
     popupDuration = 3,             -- how long the popup stays on screen
@@ -48,8 +45,7 @@ local defaults = {
     groupTextColorB = 1,
     groupTextSize = 18,
     groupPopupDuration = 3,
-    groupSoundPreset = "readycheck", -- "raidwarning" | "readycheck" | "alarm" | "custom"
-    groupCustomSoundFile = "",
+    groupSoundPreset = "readycheck", -- see SOUND_PRESET_ORDER below
     groupSoundChannel = "Master",
     groupSoundVolume = 100,        -- 0-100, relative to that channel's own volume setting
     enableRighteousFuryWatch = true,
@@ -70,7 +66,7 @@ local defaults = {
 
 -- Bump when a default value needs to overwrite what people already have
 -- saved (InitDB only fills in missing keys otherwise, so old values stick).
-local DB_VERSION = 2
+local DB_VERSION = 3
 
 local function InitDB()
     if not PaladinSealAlertDB or PaladinSealAlertDB.dbVersion ~= DB_VERSION then
@@ -99,21 +95,32 @@ local function SafeSoundKit(presetKey, name, fallbackID)
     return fallbackID
 end
 
+-- All built from the client's own sound library (SOUNDKIT), never an
+-- external file — PlaySoundFile on a real external file is the thing
+-- that's silently broken on this beta client; PlaySound(kitID) isn't.
 local SOUND_PRESETS = {
     raidwarning = SafeSoundKit("raidwarning", "RAID_WARNING", 8959),
     readycheck  = SafeSoundKit("readycheck", "READY_CHECK", 8960),
     alarm       = SafeSoundKit("alarm", "ALARM_CLOCK_WARNING_3", 12867),
+    alarm2      = SafeSoundKit("alarm2", "ALARM_CLOCK_WARNING_2", 12866),
+    alarm1      = SafeSoundKit("alarm1", "ALARM_CLOCK_WARNING_1", 12865),
+    whisper     = SafeSoundKit("whisper", "TELL_MESSAGE", 3081),
+    pvpqueue    = SafeSoundKit("pvpqueue", "PVP_THROUGH_QUEUE", 8458),
+    epicloot    = SafeSoundKit("epicloot", "UI_EPICLOOT_TOAST", 8960),
 }
 
-local SOUND_PRESET_ORDER = { "raidwarning", "readycheck", "alarm", "custom" }
+local SOUND_PRESET_ORDER = {
+    "raidwarning", "readycheck", "alarm", "alarm2", "alarm1",
+    "whisper", "pvpqueue", "epicloot",
+}
 
 -- One entry per sound you can configure separately (seal/RF/Aura alert vs.
 -- group blessing alert) — playback and slash commands both read this table.
 local SOUND_TARGETS = {
-    sound = { presetKey = "soundPreset", fileKey = "customSoundFile", channelKey = "soundChannel",
-        volumeKey = "soundVolume", tag = "seal", label = "sound", fileMessage = "custom sound set: " },
-    groupsound = { presetKey = "groupSoundPreset", fileKey = "groupCustomSoundFile", channelKey = "groupSoundChannel",
-        volumeKey = "groupSoundVolume", tag = "group", label = "group sound", fileMessage = "group custom sound set: " },
+    sound = { presetKey = "soundPreset", channelKey = "soundChannel",
+        volumeKey = "soundVolume", tag = "seal", label = "sound" },
+    groupsound = { presetKey = "groupSoundPreset", channelKey = "groupSoundChannel",
+        volumeKey = "groupSoundVolume", tag = "group", label = "group sound" },
 }
 
 -- There's no per-call volume on PlaySound/PlaySoundFile — the standard
@@ -149,34 +156,17 @@ local function PlayConfiguredSound(isGroup)
     local target = isGroup and SOUND_TARGETS.groupsound or SOUND_TARGETS.sound
     local tag = target.tag
     local preset = db[target.presetKey]
-    local customFile = db[target.fileKey]
     local channel = db[target.channelKey]
     local volume = db[target.volumeKey]
 
-    if preset == "custom" and customFile ~= "" then
-        local path = customFile
-        if not path:lower():find("^interface") then
-            path = "Interface\\AddOns\\" .. ADDON_FOLDER .. "\\Sounds\\" .. path
-        end
-        local willPlay, handle = PlayAtVolume(channel, volume, function()
-            return PlaySoundFile(path, channel)
-        end)
-        if db.debug then
-            print(PREFIX .. "[" .. tag .. "] PlaySoundFile(\"" .. path .. "\", \"" .. channel .. "\") -> willPlay=" .. tostring(willPlay) .. " handle=" .. tostring(handle))
-        end
-        if not willPlay then
-            print(PREFIX .. "could not play file: " .. path)
-        end
-    else
-        local kitID = SOUND_PRESETS[preset] or SOUND_PRESETS.raidwarning
-        local willPlay, handle = PlayAtVolume(channel, volume, function()
-            return PlaySound(kitID, channel, true)
-        end)
-        if db.debug then
-            print(PREFIX .. "[" .. tag .. "] PlaySound preset=" .. preset .. " kitID=" .. tostring(kitID)
-                .. " named=" .. tostring(SOUND_PRESET_NAMED[preset])
-                .. " -> willPlay=" .. tostring(willPlay) .. " handle=" .. tostring(handle))
-        end
+    local kitID = SOUND_PRESETS[preset] or SOUND_PRESETS.raidwarning
+    local willPlay, handle = PlayAtVolume(channel, volume, function()
+        return PlaySound(kitID, channel, true)
+    end)
+    if db.debug then
+        print(PREFIX .. "[" .. tag .. "] PlaySound preset=" .. preset .. " kitID=" .. tostring(kitID)
+            .. " named=" .. tostring(SOUND_PRESET_NAMED[preset])
+            .. " -> willPlay=" .. tostring(willPlay) .. " handle=" .. tostring(handle))
     end
 end
 
@@ -514,8 +504,7 @@ local function PrintHelp()
     print(PREFIX .. "commands:")
     print("  /sealalert sound on|off — toggle sound")
     print("  /sealalert popup on|off — toggle popup text")
-    print("  /sealalert sound preset raidwarning|readycheck|alarm — pick a built-in sound")
-    print("  /sealalert sound file <filename.ogg> — custom sound from the addon's Sounds folder (or a full Interface\\... path)")
+    print("  /sealalert sound preset <name> — pick a built-in sound: " .. table.concat(SOUND_PRESET_ORDER, ", "))
     print("  /sealalert warn <seconds> — warn N seconds before the seal expires (0 disables it)")
     print("  /sealalert throttle <seconds> — minimum gap between repeat alerts for the same buff (0 disables it)")
     print("  /sealalert duration <seconds> — how long the popup stays on screen")
@@ -523,8 +512,7 @@ local function PrintHelp()
     print("  /sealalert text warning <text> — early-warning message")
     print("  /sealalert channel <Master|SFX|Ambience|Music|Dialog> — change the sound channel")
     print("  /sealalert sound volume <0-100> — seal/RF/Aura alert volume")
-    print("  /sealalert groupsound preset raidwarning|readycheck|alarm — sound for group blessing alerts")
-    print("  /sealalert groupsound file <filename.ogg> — custom sound for group blessing alerts")
+    print("  /sealalert groupsound preset <name> — same list, for group blessing alerts")
     print("  /sealalert groupsound channel <Master|SFX|Ambience|Music|Dialog> — channel for group blessing alerts")
     print("  /sealalert groupsound volume <0-100> — group blessing alert volume")
     print("  /sealalert debug on|off — print diagnostic info when playing sounds")
@@ -553,8 +541,7 @@ local function PrintStatus()
     print(PREFIX .. "current settings:")
     print("  sound: " .. (db.enableSound and "on" or "off") .. ", channel: " .. db.soundChannel ..
         ", volume: " .. db.soundVolume .. "%" ..
-        ", preset: " .. db.soundPreset ..
-        (db.soundPreset == "custom" and (" (" .. db.customSoundFile .. ")") or ""))
+        ", preset: " .. db.soundPreset)
     print("  popup: " .. (db.enablePopup and "on" or "off") .. ", duration: " .. db.popupDuration .. "s")
     print("  early warning: " .. db.warnBeforeSeconds .. "s before expiry")
     print("  alert throttle: " .. db.alertThrottleSeconds .. "s")
@@ -567,8 +554,8 @@ local function PrintStatus()
     print("  Righteous Fury watch: " .. (db.enableRighteousFuryWatch and "on" or "off"))
     print("  Aura watch: " .. (db.enableAuraWatch and "on" or "off"))
     print("  group blessing watch: " .. (db.enableGroupBlessingWatch and "on" or "off") ..
-        ", channel: " .. db.groupSoundChannel .. ", preset: " .. db.groupSoundPreset ..
-        (db.groupSoundPreset == "custom" and (" (" .. db.groupCustomSoundFile .. ")") or ""))
+        ", channel: " .. db.groupSoundChannel .. ", volume: " .. db.groupSoundVolume .. "%" ..
+        ", preset: " .. db.groupSoundPreset)
 end
 
 -- Most commands are just an on/off toggle or an expired/warning text pair —
@@ -631,15 +618,7 @@ SlashCmdList["PALADINSEALALERT"] = function(input)
             db[soundTarget.presetKey] = preset
             print(PREFIX .. soundTarget.label .. " preset: " .. preset)
         else
-            print(PREFIX .. "unknown preset. Available: raidwarning, readycheck, alarm")
-        end
-    elseif soundTarget and sub == "file" and args[3] then
-        local filename = table.concat(args, " ", 3)
-        db[soundTarget.fileKey] = filename
-        db[soundTarget.presetKey] = "custom"
-        print(PREFIX .. soundTarget.fileMessage .. filename)
-        if soundTarget == SOUND_TARGETS.sound then
-            print(PREFIX .. "|cffff9900note:|r custom files are currently silent on WoW: Forever beta (PlaySoundFile bug). Use a preset if you don't hear anything.")
+            print(PREFIX .. "unknown preset. Available: " .. table.concat(SOUND_PRESET_ORDER, ", "))
         end
     elseif soundTarget and sub == "channel" and args[3] then
         db[soundTarget.channelKey] = args[3]

@@ -3,7 +3,7 @@
 ## Notes: Alerts when your Seal, Righteous Fury, or Aura falls off, tracks party Blessings, and lets you click a party row to cast one directly.
 ## Notes-ruRU: Оповещает, когда спадает Печать, Праведная ярость или Аура, следит за Благословениями в группе и позволяет кастовать их прямо по клику на строке.
 ## Author: embox53
-## Version: 1.2.0
+## Version: 1.3.0
 ## X-Category: Buffs
 ## X-License: MIT
 ## SavedVariables: PaladinSealAlertDB
