@@ -9,3 +9,6 @@ Thumbs.db
 # Packaged releases (built locally, not tracked)
 *.zip
 /.release
+
+# Private notes
+PROMOTION.md

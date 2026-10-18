@@ -20,6 +20,8 @@ Stop staring at your buff bar. **Sealkeeper: Forever** is a Paladin addon built 
     ![Minimal look](docs/status-window-minimal.png)
 - **Fully configurable** — pick from eight built-in alert sounds, set per-alert volume, colors, text size, and messages for every alert, all from an in-game settings panel (slash commands work too, if you prefer those).
 - **Alert throttle** — a minimum gap between repeat alerts for the same buff, so a flickering connection doesn't turn one dropped Seal into a sound-spam.
+- **Any client language** — buffs are recognised by spell, not just by English name, so alerts and click-to-cast work on German, French, Spanish, Russian, Chinese, Korean and other clients.
+- **No false alarms** — dead, offline and out-of-sight party members are skipped, not reported as unbuffed; your own death doesn't set off a wall of alerts; BoP/Freedom/Sacrifice don't count as your Blessing.
 - **Class-colored names** — party rows are colored by class so your raid frames and the status window always agree at a glance.
 
 ## Installation
@@ -37,6 +39,7 @@ Type `/sealalert options` in-game to open the full settings panel, or `/sealaler
 /sealalert group on|off
 /sealalert scale 1.2
 /sealalert blessing ctrl wisdom
+/sealalert groupwarn 15
 /sealalert options
 ```
 
@@ -45,7 +48,7 @@ Type `/sealalert options` in-game to open the full settings panel, or `/sealaler
 This addon was built and tested during the first weeks of the WoW: Forever beta, which has a few client-side quirks worth knowing about:
 
 - **Buff reads are blocked entirely while you're in combat.** This is a deliberate client restriction (aura data is hidden from addons during combat), so the status window shows the last known state instead of live data until combat ends. Click-to-cast still works mid-fight — it doesn't need a fresh aura read.
-- **Click-cast bindings can't be changed while in combat.** Protected click attributes are frozen during a fight; reassign a Blessing to a different click type between pulls instead.
+- **The status window and its click bindings are frozen during combat.** Its click-to-cast rows are protected frames, so rows for people who join mid-fight, binding changes, hiding and resizing all apply automatically as soon as combat ends.
 - **"Out of range" detection is best-effort.** Range checks are subject to the same anti-automation restriction as buff reads on this client, so a member who's actually out of range may not always get flagged — offline detection is unaffected and always accurate.
 - **Alert sounds are all built-in** (no custom audio files) — `PlaySoundFile` on a real external file is silently broken on this client, so every alert uses the game's own sound library instead, which doesn't hit that bug.
 

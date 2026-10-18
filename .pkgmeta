@@ -4,3 +4,6 @@ ignore:
   - README.md
   - .gitignore
   - .pkgmeta
+  - PROMOTION.md
+  - CHANGELOG.md
+  - docs

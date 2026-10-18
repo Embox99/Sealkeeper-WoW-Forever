@@ -155,14 +155,28 @@ local function AddSlider(parent, labelText, x, y, minVal, maxVal, step, getFunc,
     slider:SetMinMaxValues(minVal, maxVal)
     slider:SetValueStep(step)
     slider:SetObeyStepOnDrag(true)
-    if slider.Text then slider.Text:SetText(labelText) end
     if slider.Low then slider.Low:SetText(tostring(minVal)) end
     if slider.High then slider.High:SetText(tostring(maxVal)) end
+
+    -- Show the current value in the label — the template itself only shows
+    -- min/max, so you otherwise can't tell what you've actually picked.
+    local function UpdateLabel(value)
+        if not slider.Text then return end
+        local shown = (step < 1) and string.format("%.2f", value):gsub("0+$", ""):gsub("%.$", "")
+            or tostring(math.floor(value + 0.5))
+        slider.Text:SetText(labelText .. ": |cffffffff" .. shown .. "|r")
+    end
+
     slider:SetValue(getFunc())
+    UpdateLabel(getFunc())
     slider:SetScript("OnValueChanged", function(self, value)
         setFunc(value)
+        UpdateLabel(value)
     end)
-    table.insert(refreshCallbacks, function() slider:SetValue(getFunc()) end)
+    table.insert(refreshCallbacks, function()
+        slider:SetValue(getFunc())
+        UpdateLabel(getFunc())
+    end)
     return slider
 end
 
@@ -352,7 +366,7 @@ local function BuildPanel()
 
     local subtitle = content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     subtitle:SetPoint("TOPLEFT", 16, y)
-    subtitle:SetText("Alerts you when your paladin seal or Righteous Fury expires, or a party member's Blessing falls off")
+    subtitle:SetText("Alerts you when your Seal, Righteous Fury or Aura drops, or a party member's Blessing falls off")
     y = y - 34
 
     AddCheckbox(content, "Sound", 20, y, function() return db.enableSound end, function(v) db.enableSound = v end)
@@ -499,7 +513,15 @@ local function BuildPanel()
     AddCheckbox(content, "Track party members' Blessings", 20, y,
         function() return db.enableGroupBlessingWatch end,
         function(v) db.enableGroupBlessingWatch = v end)
-    y = y - 40
+    y = y - 46
+
+    AddSlider(content, "Warn early (sec, 0 = off)", 20, y, 0, 60, 5,
+        function() return db.groupWarnBeforeSeconds end,
+        function(v) db.groupWarnBeforeSeconds = v end)
+    AddSlider(content, "Popup duration (sec)", 300, y, 1, 8, 1,
+        function() return db.groupPopupDuration end,
+        function(v) db.groupPopupDuration = v end)
+    y = y - 50
 
     y = AddSoundControls(y, "groupSoundPreset", "groupSoundChannel", "groupSoundVolume")
 
@@ -519,7 +541,8 @@ local function BuildPanel()
     groupNote:SetPoint("TOPLEFT", 20, y)
     groupNote:SetWidth(660)
     groupNote:SetJustifyH("LEFT")
-    groupNote:SetText("Watches Blessing of Might/Wisdom/Kings/etc. on yourself and party1-4.")
+    groupNote:SetText("Watches your Blessings on yourself and party1-4. "
+        .. "Members who are dead, offline or out of sight are skipped instead of reported as unbuffed.")
     y = y - 30
 
     AddTestButton(160, "Test Group Alert", "PaladinSealAlert_TriggerGroupTest", nil, 20, y)
@@ -596,6 +619,36 @@ statusWindow:EnableMouse(true)
 statusWindow:RegisterForDrag("LeftButton")
 statusWindow:SetClampedToScreen(true)
 
+-- The party rows below are secure buttons, which makes this window (their
+-- parent and anchor) protected in combat too: moving, resizing, rescaling,
+-- showing or hiding it from addon code is blocked mid-fight ("Interface
+-- action failed because of an AddOn"). Anything like that goes through
+-- here and, in combat, waits for PLAYER_REGEN_ENABLED instead.
+local pendingAfterCombat = {}
+
+local function InCombat()
+    return InCombatLockdown and InCombatLockdown()
+end
+
+local function RunOutOfCombat(key, func)
+    if InCombat() then
+        pendingAfterCombat[key] = func
+        return false
+    end
+    func()
+    return true
+end
+
+local combatQueueFrame = CreateFrame("Frame")
+combatQueueFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+combatQueueFrame:SetScript("OnEvent", function()
+    local queued = pendingAfterCombat
+    pendingAfterCombat = {}
+    for _, func in pairs(queued) do
+        func()
+    end
+end)
+
 -- Re-invoked after every resize below — on this client the backdrop border
 -- can visibly lag a frame's actual size after SetSize/SetHeight (the last
 -- row sticking out past the border instead of being enclosed by it), so we
@@ -625,6 +678,7 @@ end
 statusWindow:SetScript("OnDragStart", function(self)
     local db = PaladinSealAlertDB
     if db and db.statusWindowLocked then return end
+    if InCombat() then return end
     self:StartMoving()
 end)
 statusWindow:SetScript("OnDragStop", function(self)
@@ -638,7 +692,9 @@ statusTitle:SetText("Sealkeeper")
 
 local function HideStatusWindow()
     PaladinSealAlertDB.showStatusWindow = false
-    statusWindow:Hide()
+    if not RunOutOfCombat("visibility", function() statusWindow:Hide() end) then
+        print("|cff3399ffSealkeeper|r: the status window will hide after combat.")
+    end
 end
 
 local closeButton = CreateFrame("Button", nil, statusWindow, "UIPanelCloseButton")
@@ -871,9 +927,14 @@ end
 local BAR_HEIGHT, BAR_GAP = 20, 2
 local STATUS_ROW_UNITS = { "player", "party1", "party2", "party3", "party4" }
 
+-- Localized spell name for this client (so the /cast macro works on
+-- non-English clients too), falling back to the English name.
 local function GetBlessingSpell(dbKey, fallbackKey)
     local db = PaladinSealAlertDB
     local key = (db and db[dbKey]) or fallbackKey
+    if PaladinSealAlert_GetBlessingSpellName then
+        return PaladinSealAlert_GetBlessingSpellName(key)
+    end
     return (PaladinSealAlert_BlessingSpells and PaladinSealAlert_BlessingSpells[key]) or "Blessing of Kings"
 end
 
@@ -979,24 +1040,31 @@ end
 -- Called when the Blessing bindings change in the options panel. Refuses
 -- in combat instead of throwing — secure attributes are frozen mid-fight.
 function PaladinSealAlert_RefreshBlessingBindings()
-    if InCombatLockdown and InCombatLockdown() then
-        print("|cff3399ffSealkeeper|r: can't change click-cast bindings in combat — try again after the fight.")
-        return
-    end
-    for unit, row in pairs(barRowsByUnit) do
-        ApplyBlessingAttributes(row, unit)
+    local applied = RunOutOfCombat("bindings", function()
+        for unit, row in pairs(barRowsByUnit) do
+            ApplyBlessingAttributes(row, unit)
+        end
+    end)
+    if not applied then
+        print("|cff3399ffSealkeeper|r: click-cast bindings will update as soon as combat ends.")
     end
 end
 
 -- Not tied to a real unit, so it's a plain (non-secure) Button — still a
 -- Button, not a Frame, since AddBarVisuals' highlight texture needs one.
 -- Shorter than a regular row — it's just a placeholder note, not a member.
+-- It hangs just below the window instead of inside it: it appears exactly
+-- when combat starts, when the (protected) window can no longer be resized
+-- to make room — which is what used to leave it sticking out past the border.
 local COMBAT_ROW_HEIGHT = 14
 local combatRow = CreateFrame("Button", nil, statusWindow)
 combatRow:SetHeight(COMBAT_ROW_HEIGHT)
+combatRow:SetPoint("TOPLEFT", statusWindow, "BOTTOMLEFT", 4, 1)
+combatRow:SetPoint("TOPRIGHT", statusWindow, "BOTTOMRIGHT", -4, 1)
 AddBarVisuals(combatRow)
 pcall(function() combatRow.text:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE") end)
 combatRow:SetScript("OnMouseUp", OnRightClickOpenMenu)
+combatRow:Hide()
 
 local function GetClassColor(classToken)
     local c = classToken and RAID_CLASS_COLORS and RAID_CLASS_COLORS[classToken]
@@ -1010,7 +1078,7 @@ local MODE_COLORS = { ok = COLOR_OK, warn = COLOR_WARN, offline = COLOR_OFFLINE 
 
 -- The bar carries the buff status; classToken colors the name by class.
 -- buffIcon/otherBuffIcon show your Blessing and someone else's, if present.
-local function SetBarStatus(row, label, mode, classToken, buffIcon, otherBuffIcon)
+local function SetBarVisuals(row, label, mode, classToken, buffIcon, otherBuffIcon)
     local c = MODE_COLORS[mode] or COLOR_BAD
     row.text:SetText(label)
     row.text:SetTextColor(GetClassColor(classToken))
@@ -1028,7 +1096,6 @@ local function SetBarStatus(row, label, mode, classToken, buffIcon, otherBuffIco
     else
         row.otherIcon:Hide()
     end
-    row:Show()
 end
 
 local function RefreshStatusWindow()
@@ -1060,23 +1127,33 @@ local function RefreshStatusWindow()
     local barTop = GetBadgeY() - BADGE_HEIGHT - 10
     local barWidth = statusWindow:GetWidth() - 16
     local rowIndex = 0
+    -- In combat the rows (and the window) are frozen in place — see
+    -- RunOutOfCombat. Rows already showing still get their colors/icons
+    -- updated; joins, leaves and resizing catch up once combat ends.
+    local layoutFrozen = InCombat()
 
     local function PlaceRow(row)
         rowIndex = rowIndex + 1
-        row:ClearAllPoints()
-        row:SetPoint("TOPLEFT", 8, barTop - (rowIndex - 1) * (BAR_HEIGHT + BAR_GAP))
-        row:SetWidth(barWidth)
+        if not layoutFrozen then
+            row:ClearAllPoints()
+            row:SetPoint("TOPLEFT", 8, barTop - (rowIndex - 1) * (BAR_HEIGHT + BAR_GAP))
+            row:SetWidth(barWidth)
+            row:Show()
+        end
         return row
     end
 
     local shownUnits = {}
     for _, member in ipairs(snapshot.members) do
         local row = barRowsByUnit[member.unit]
-        if row then
+        if row and (not layoutFrozen or row:IsShown()) then
             shownUnits[member.unit] = true
             local label, mode
             if not member.online then
                 label = member.name:sub(1, 8) .. " (offline)"
+                mode = "offline"
+            elseif member.dead then
+                label = member.name:sub(1, 10) .. " (dead)"
                 mode = "offline"
             elseif member.outOfRange then
                 label = member.name:sub(1, 8) .. " (out of range)"
@@ -1085,27 +1162,29 @@ local function RefreshStatusWindow()
                 label = member.name:sub(1, 14)
                 mode = member.hasBuff and "ok" or "bad"
             end
-            SetBarStatus(PlaceRow(row), label, mode, member.class, member.buffIcon, member.otherBuffIcon)
+            SetBarVisuals(PlaceRow(row), label, mode, member.class, member.buffIcon, member.otherBuffIcon)
         end
     end
 
-    for unit, row in pairs(barRowsByUnit) do
-        if not shownUnits[unit] then row:Hide() end
+    if not layoutFrozen then
+        for unit, row in pairs(barRowsByUnit) do
+            if not shownUnits[unit] then row:Hide() end
+        end
     end
 
+    -- Not a secure frame, so it can come and go freely mid-fight.
     if snapshot.locked then
-        SetBarStatus(PlaceRow(combatRow), "(combat)", "warn")
+        SetBarVisuals(combatRow, "(combat)", "warn")
+        combatRow:Show()
     else
         combatRow:Hide()
     end
 
-    -- SetHeight alone can leave the backdrop border a tick behind the new
-    -- row count on this client (the combat row visibly sticking out past
-    -- the bottom edge) — SetSize forces a full redraw, plus some extra
-    -- bottom padding as a safety margin.
-    -- Small bottom margin — the exact formula wasn't quite enough to keep
-    -- the last row from visually sticking out past the border, so this
-    -- pads a bit past where the math alone says it needs to.
+    if layoutFrozen then return end
+
+    -- SetSize (not just SetHeight) plus re-applying the backdrop makes the
+    -- border redraw against the new size right away; the extra bottom
+    -- padding keeps the last row comfortably inside the border.
     local totalHeight = (barTop * -1) + rowIndex * (BAR_HEIGHT + BAR_GAP) + 22
     statusWindow:SetSize(statusWindow:GetWidth(), math.max(70, totalHeight))
     ApplyStatusWindowBackdrop()
@@ -1116,18 +1195,38 @@ C_Timer.NewTicker(0.5, RefreshStatusWindow)
 function PaladinSealAlert_RefreshStatusWindowVisibility()
     local db = PaladinSealAlertDB
     if not db then return end
-    if db.showStatusWindow then
-        statusWindow:Show()
-        RefreshStatusWindow()
-    else
-        statusWindow:Hide()
-    end
+    -- Party Blessing tracking means nothing on other classes — keep the
+    -- window out of the way on alts even though the addon is enabled.
+    local isPaladin = not PaladinSealAlert_IsPaladin or PaladinSealAlert_IsPaladin()
+    RunOutOfCombat("visibility", function()
+        if db.showStatusWindow and isPaladin then
+            statusWindow:Show()
+            RefreshStatusWindow()
+        else
+            statusWindow:Hide()
+        end
+    end)
 end
 
 function PaladinSealAlert_ApplyStatusWindowScale()
     local db = PaladinSealAlertDB
     if not db then return end
-    statusWindow:SetScale(db.statusWindowScale or 1.0)
+    RunOutOfCombat("scale", function()
+        statusWindow:SetScale(db.statusWindowScale or 1.0)
+    end)
+end
+
+-- Re-applies every setting that has a visible effect — used after
+-- "/sealalert reset" so nothing waits for a /reload.
+function PaladinSealAlert_ApplyAllSettings()
+    PaladinSealAlert_ApplyTextStyle()
+    PaladinSealAlert_ApplyStatusWindowScale()
+    PaladinSealAlert_ApplyStatusWindowChrome()
+    PaladinSealAlert_RefreshStatusWindowVisibility()
+    PaladinSealAlert_RefreshBlessingBindings()
+    for _, refresh in ipairs(refreshCallbacks) do
+        refresh()
+    end
 end
 
 local statusWindowInit = CreateFrame("Frame")
@@ -1135,12 +1234,17 @@ statusWindowInit:RegisterEvent("PLAYER_LOGIN")
 statusWindowInit:SetScript("OnEvent", function()
     local db = PaladinSealAlertDB
     if not db then return end
-    if db.statusWindowPoint and db.statusWindowX and db.statusWindowY then
-        statusWindow:ClearAllPoints()
-        statusWindow:SetPoint(db.statusWindowPoint, UIParent, db.statusWindowRelPoint or db.statusWindowPoint, db.statusWindowX, db.statusWindowY)
-    end
+    RunOutOfCombat("position", function()
+        if db.statusWindowPoint and db.statusWindowX and db.statusWindowY then
+            statusWindow:ClearAllPoints()
+            statusWindow:SetPoint(db.statusWindowPoint, UIParent, db.statusWindowRelPoint or db.statusWindowPoint, db.statusWindowX, db.statusWindowY)
+        end
+    end)
     PaladinSealAlert_ApplyStatusWindowScale()
     PaladinSealAlert_ApplyStatusWindowChrome()
     PaladinSealAlert_RefreshStatusWindowVisibility()
+    -- The rows were built at load time, before saved settings existed, so
+    -- they still carry the default Kings/Might/Wisdom bindings — apply the
+    -- player's own choices now.
+    PaladinSealAlert_RefreshBlessingBindings()
 end)
-

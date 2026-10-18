@@ -11,6 +11,13 @@ local BLESSING_SPELLS = {
     wisdom = "Blessing of Wisdom",
 }
 local BLESSING_ORDER = { "kings", "might", "wisdom" }
+
+-- Rank 1 spell IDs — only used to look up the client's own localized name,
+-- so /cast works on non-English clients (the English name above is the
+-- fallback if the ID isn't known to this client).
+local BLESSING_SPELL_IDS = {
+    kings = 20217, might = 19740, wisdom = 19742,
+}
 local BLESSING_CLICK_DB_KEYS = {
     click = "blessingPlainKey",
     ctrl  = "blessingCtrlKey",
@@ -59,17 +66,22 @@ local defaults = {
     blessingPlainKey = "kings",    -- which Blessing each click type casts on a party row — see BLESSING_SPELLS below
     blessingCtrlKey = "might",
     blessingShiftKey = "wisdom",
+    groupWarnBeforeSeconds = 10,   -- early warning for party Blessings (they last minutes, so 3s is too late to rebuff); 0 disables it
     enableAuraWatch = true,
     msgAuraExpired = "AURA NOT ACTIVE",
     msgAuraWarning = "",
 }
 
--- Bump when a default value needs to overwrite what people already have
--- saved (InitDB only fills in missing keys otherwise, so old values stick).
+-- Bump when saved data needs migrating. New keys don't need a bump —
+-- InitDB fills in anything missing from defaults.
 local DB_VERSION = 3
 
 local function InitDB()
-    if not PaladinSealAlertDB or PaladinSealAlertDB.dbVersion ~= DB_VERSION then
+    PaladinSealAlertDB = PaladinSealAlertDB or {}
+    -- Pre-v3 layouts used different keys, so those get one clean start.
+    -- Anything newer is kept as-is: a version bump must never wipe people's
+    -- settings and window position again, only migrate what changed.
+    if (PaladinSealAlertDB.dbVersion or 0) < 3 then
         PaladinSealAlertDB = {}
     end
     for key, value in pairs(defaults) do
@@ -188,37 +200,98 @@ elseif UnitAura then
     end
 end
 
-local SEAL_PATTERNS = {
-    "^Seal of ",
-    "^Печать ",
+-- Each matcher is: English/Russian name patterns, plus spell IDs whose
+-- localized names get resolved at login (so German, French, Spanish,
+-- Chinese, etc. clients work too), plus names that must never match.
+
+local function GetSpellNameByID(spellID)
+    if C_Spell and C_Spell.GetSpellName then
+        local ok, name = pcall(C_Spell.GetSpellName, spellID)
+        if ok and name then return name end
+    end
+    if GetSpellInfo then
+        local ok, name = pcall(GetSpellInfo, spellID)
+        if ok and name then return name end
+    end
+    return nil
+end
+
+local SEAL_MATCHER = {
+    patterns = { "^Seal of ", "^Печать " },
+    -- Righteousness (both rank-1 IDs seen across versions), Crusader,
+    -- Command, Justice, Light, Wisdom
+    spellIDs = { 20154, 21084, 21082, 20375, 20164, 20165, 20166 },
 }
 
-local BLESSING_PATTERNS = {
-    "^Blessing of ",
-    "^Благословение ",
+-- Protection/Freedom/Sacrifice are short
+-- emergency buffs, not "your Blessing" on someone — they'd otherwise fire a
+-- bogus "Blessing expired" seconds after every BoP.
+local BLESSING_MATCHER = {
+    patterns = { "^Blessing of ", "^Благословение " },
+    spellIDs = { 19740, 19742, 20217 },
+    excludeNames = { "Blessing of Protection", "Blessing of Freedom", "Blessing of Sacrifice",
+                     "Благословение защиты", "Благословение свободы", "Благословение жертвенности" },
+    excludeSpellIDs = { 1022, 1044, 6940 },
 }
 
-local RIGHTEOUS_FURY_PATTERNS = {
-    "^Righteous Fury$",
-    "^Праведная ярость$",
+local RIGHTEOUS_FURY_MATCHER = {
+    patterns = { "^Righteous Fury$", "^Праведная ярость$" },
+    spellIDs = { 25780 },
 }
 
 -- Devotion Aura, Retribution Aura, resistance auras, etc. These don't expire
 -- on their own (only cancelled/replaced/death removes them) — we're just
 -- checking whether any of them is up, not which one.
-local AURA_PATTERNS = {
-    " Aura$",
-    "^Аура ",
+local AURA_MATCHER = {
+    patterns = { " Aura$", "^Аура " },
+    spellIDs = { 465, 7294, 19746, 19876, 19888, 19891, 20218 },
 }
 
-local function MatchesAnyPattern(name, patterns)
+local ALL_MATCHERS = { SEAL_MATCHER, BLESSING_MATCHER, RIGHTEOUS_FURY_MATCHER, AURA_MATCHER }
+
+-- Called at login, once spell data is available.
+local function ResolveLocalizedSpellNames()
+    for _, matcher in ipairs(ALL_MATCHERS) do
+        matcher.names = {}
+        for _, id in ipairs(matcher.spellIDs or {}) do
+            local name = GetSpellNameByID(id)
+            if name then matcher.names[name] = true end
+        end
+        matcher.excluded = {}
+        for _, name in ipairs(matcher.excludeNames or {}) do
+            matcher.excluded[name] = true
+        end
+        for _, id in ipairs(matcher.excludeSpellIDs or {}) do
+            local name = GetSpellNameByID(id)
+            if name then matcher.excluded[name] = true end
+        end
+    end
+end
+
+local function MatchesAura(name, matcher)
     if not name then return false end
-    for _, pattern in ipairs(patterns) do
+    if matcher.excluded and matcher.excluded[name] then return false end
+    if matcher.names and matcher.names[name] then return true end
+    for _, pattern in ipairs(matcher.patterns) do
         if name:find(pattern) then
             return true
         end
     end
     return false
+end
+
+-- Unit checks can return "secret" values on this client in some states,
+-- which throw when tested — treat anything unreadable as `fallback`.
+local function SafeUnitCheck(func, unit, fallback)
+    if not func then return fallback end
+    local ok, result = pcall(function() return func(unit) and true or false end)
+    if ok then return result end
+    return fallback
+end
+
+local function GetBlessingSpellName(key)
+    local id = BLESSING_SPELL_IDS[key]
+    return (id and GetSpellNameByID(id)) or BLESSING_SPELLS[key] or BLESSING_SPELLS.kings
 end
 
 -- In combat, this client blocks all aura reads from addons (even your own
@@ -234,7 +307,7 @@ end
 
 -- sourceUnit, if given, only matches auras YOU cast — otherwise any
 -- paladin's Blessing on someone reads as "buffed", even if yours fell off.
-local function FindAuraMatching(unit, patterns, sourceUnit)
+local function FindAuraMatching(unit, matcher, sourceUnit)
     if not GetAuraData then return nil end
     if AurasAreSecret() then return nil end
 
@@ -242,7 +315,7 @@ local function FindAuraMatching(unit, patterns, sourceUnit)
     while true do
         local ok, aura = pcall(GetAuraData, unit, index)
         if not ok or not aura then break end
-        if MatchesAnyPattern(aura.name, patterns) then
+        if MatchesAura(aura.name, matcher) then
             if not sourceUnit or (aura.sourceUnit and UnitIsUnit(aura.sourceUnit, sourceUnit)) then
                 return aura
             end
@@ -254,7 +327,7 @@ end
 
 -- Same scan, but for a Blessing from anyone EXCEPT excludeSourceUnit — lets
 -- the status window show "someone else already buffed them" separately.
-local function FindAuraMatchingOtherSource(unit, patterns, excludeSourceUnit)
+local function FindAuraMatchingOtherSource(unit, matcher, excludeSourceUnit)
     if not GetAuraData then return nil end
     if AurasAreSecret() then return nil end
 
@@ -262,7 +335,7 @@ local function FindAuraMatchingOtherSource(unit, patterns, excludeSourceUnit)
     while true do
         local ok, aura = pcall(GetAuraData, unit, index)
         if not ok or not aura then break end
-        if MatchesAnyPattern(aura.name, patterns) then
+        if MatchesAura(aura.name, matcher) then
             if not (aura.sourceUnit and UnitIsUnit(aura.sourceUnit, excludeSourceUnit)) then
                 return aura
             end
@@ -273,15 +346,17 @@ local function FindAuraMatchingOtherSource(unit, patterns, excludeSourceUnit)
 end
 
 local function FindActiveSeal()
-    return FindAuraMatching("player", SEAL_PATTERNS)
+    return FindAuraMatching("player", SEAL_MATCHER)
 end
 
 local function FindActiveRighteousFury()
-    return FindAuraMatching("player", RIGHTEOUS_FURY_PATTERNS)
+    return FindAuraMatching("player", RIGHTEOUS_FURY_MATCHER)
 end
 
+-- Only YOUR aura counts — otherwise another paladin's Devotion Aura (or a
+-- hunter's Trueshot Aura, which also ends in " Aura") hides that yours is off.
 local function FindActiveAura()
-    return FindAuraMatching("player", AURA_PATTERNS)
+    return FindAuraMatching("player", AURA_MATCHER, "player")
 end
 
 -- ---------------------------------------------------------------------------
@@ -293,7 +368,8 @@ local function TriggerAlert(message, isGroup)
     if db.enableSound then
         PlayConfiguredSound(isGroup)
     end
-    if not db.enablePopup then return end
+    -- An emptied message text means "sound only" for that alert.
+    if not db.enablePopup or not message or message == "" then return end
 
     if isGroup and PaladinSealAlert_ShowGroupPopup then
         PaladinSealAlert_ShowGroupPopup(message, db.groupPopupDuration)
@@ -354,6 +430,15 @@ local function UpdateBuffState(state, aura, warnBeforeSeconds, onWarning, onExpi
     end
 end
 
+-- Forget a buff without alerting — used when it's gone for a reason that
+-- isn't worth an alert (death wipes every buff at once).
+local function ClearBuffStateSilently(state)
+    state.has = false
+    state.signature = nil
+    state.warned = false
+    state.icon = nil
+end
+
 -- ---------------------------------------------------------------------------
 -- Group blessing watch (player + party1-4). Keyed by GUID, not unit token,
 -- so someone leaving/joining mid-session doesn't get mixed up with whoever
@@ -377,16 +462,39 @@ local function ScanGroupBlessings()
                 groupState[guid] = state
             end
 
-            local aura = FindAuraMatching(unit, BLESSING_PATTERNS, "player")
-            state.icon = aura and aura.icon or nil
+            if SafeUnitCheck(UnitIsDeadOrGhost, unit, false) then
+                -- Dying wipes every buff — that's not a missed Blessing.
+                ClearBuffStateSilently(state)
+                state.otherIcon = nil
+            elseif SafeUnitCheck(UnitIsConnected, unit, true)
+                and SafeUnitCheck(UnitIsVisible, unit, true) then
+                -- Offline or too far away to be visible: the client returns
+                -- no auras at all, which would read as "Blessing fell off".
+                -- Those are skipped, keeping the last known state.
+                local aura = FindAuraMatching(unit, BLESSING_MATCHER, "player")
+                state.icon = aura and aura.icon or nil
 
-            local otherAura = FindAuraMatchingOtherSource(unit, BLESSING_PATTERNS, "player")
-            state.otherIcon = otherAura and otherAura.icon or nil
+                local otherAura = FindAuraMatchingOtherSource(unit, BLESSING_MATCHER, "player")
+                state.otherIcon = otherAura and otherAura.icon or nil
 
-            UpdateBuffState(state, aura, db.warnBeforeSeconds,
-                function() TriggerAlert(FormatGroupMessage(db.msgGroupWarning, name), true) end,
-                function() TriggerAlert(FormatGroupMessage(db.msgGroupExpired, name), true) end)
+                UpdateBuffState(state, aura, db.groupWarnBeforeSeconds or db.warnBeforeSeconds,
+                    function() TriggerAlert(FormatGroupMessage(db.msgGroupWarning, name), true) end,
+                    function() TriggerAlert(FormatGroupMessage(db.msgGroupExpired, name), true) end)
+            end
         end
+    end
+end
+
+-- Drops state for people who've left the group, so someone rejoining later
+-- doesn't fire an "expired" alert for a Blessing from an hour ago.
+local function PruneGroupState()
+    local present = {}
+    for _, unit in ipairs(GROUP_UNITS) do
+        local guid = UnitExists(unit) and UnitGUID(unit)
+        if guid then present[guid] = true end
+    end
+    for guid in pairs(groupState) do
+        if not present[guid] then groupState[guid] = nil end
     end
 end
 
@@ -442,10 +550,30 @@ local function OnTick()
         return
     end
 
-    for _, watch in ipairs(SELF_WATCHES) do
-        ProcessSelfWatch(watch)
+    if SafeUnitCheck(UnitIsDeadOrGhost, "player", false) then
+        -- Dead: Seal/RF/Aura are all gone, and alerting about it while you
+        -- wait for a rez is just noise.
+        for _, watch in ipairs(SELF_WATCHES) do
+            ClearBuffStateSilently(watch)
+        end
+    else
+        for _, watch in ipairs(SELF_WATCHES) do
+            ProcessSelfWatch(watch)
+        end
     end
     ScanGroupBlessings()
+end
+
+-- UNIT_AURA can fire many times in one frame (a whole party buffed at
+-- once); batch those into a single scan shortly after.
+local scanPending = false
+local function RequestScan()
+    if scanPending then return end
+    scanPending = true
+    C_Timer.After(0.1, function()
+        scanPending = false
+        OnTick()
+    end)
 end
 
 -- ---------------------------------------------------------------------------
@@ -477,9 +605,11 @@ local eventFrame = CreateFrame("Frame")
 eventFrame:RegisterEvent("PLAYER_LOGIN")
 eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 eventFrame:RegisterEvent("UNIT_AURA")
+eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
 eventFrame:SetScript("OnEvent", function(self, event, unit)
     if event == "PLAYER_LOGIN" then
         InitDB()
+        ResolveLocalizedSpellNames()
         if IsPlayerPaladin() then
             print(PREFIX .. "loaded. Type /sealalert help for options.")
         end
@@ -491,8 +621,10 @@ eventFrame:SetScript("OnEvent", function(self, event, unit)
         end
     elseif event == "UNIT_AURA" then
         if IsPlayerPaladin() and (unit == "player" or (unit and unit:match("^party%d$"))) then
-            OnTick()
+            RequestScan()
         end
+    elseif event == "GROUP_ROSTER_UPDATE" then
+        PruneGroupState()
     end
 end)
 
@@ -500,12 +632,33 @@ end)
 -- Slash commands
 -- ---------------------------------------------------------------------------
 
+-- "sfx" -> "SFX", "master" -> "Master"; nil for anything that isn't a real
+-- channel (PlaySound with a bogus channel name just plays nothing).
+local function NormalizeChannel(input)
+    if not input then return nil end
+    for channel in pairs(CHANNEL_CVARS) do
+        if channel:lower() == input:lower() then return channel end
+    end
+    return nil
+end
+
+local function SetChannel(dbKey, label, input)
+    local channel = NormalizeChannel(input)
+    if channel then
+        PaladinSealAlertDB[dbKey] = channel
+        print(PREFIX .. label .. " channel: " .. channel)
+    else
+        print(PREFIX .. "unknown channel. Available: Master, SFX, Ambience, Music, Dialog")
+    end
+end
+
 local function PrintHelp()
     print(PREFIX .. "commands:")
     print("  /sealalert sound on|off — toggle sound")
     print("  /sealalert popup on|off — toggle popup text")
     print("  /sealalert sound preset <name> — pick a built-in sound: " .. table.concat(SOUND_PRESET_ORDER, ", "))
     print("  /sealalert warn <seconds> — warn N seconds before the seal expires (0 disables it)")
+    print("  /sealalert groupwarn <seconds> — warn N seconds before a party member's Blessing expires (0 disables it)")
     print("  /sealalert throttle <seconds> — minimum gap between repeat alerts for the same buff (0 disables it)")
     print("  /sealalert duration <seconds> — how long the popup stays on screen")
     print("  /sealalert text expired <text> — message shown when the seal is gone")
@@ -543,7 +696,7 @@ local function PrintStatus()
         ", volume: " .. db.soundVolume .. "%" ..
         ", preset: " .. db.soundPreset)
     print("  popup: " .. (db.enablePopup and "on" or "off") .. ", duration: " .. db.popupDuration .. "s")
-    print("  early warning: " .. db.warnBeforeSeconds .. "s before expiry")
+    print("  early warning: " .. db.warnBeforeSeconds .. "s before expiry (party Blessings: " .. db.groupWarnBeforeSeconds .. "s)")
     print("  alert throttle: " .. db.alertThrottleSeconds .. "s")
     print("  text (expired): " .. db.msgExpired)
     print("  text (warning): " .. db.msgWarning)
@@ -621,8 +774,7 @@ SlashCmdList["PALADINSEALALERT"] = function(input)
             print(PREFIX .. "unknown preset. Available: " .. table.concat(SOUND_PRESET_ORDER, ", "))
         end
     elseif soundTarget and sub == "channel" and args[3] then
-        db[soundTarget.channelKey] = args[3]
-        print(PREFIX .. soundTarget.label .. " channel: " .. args[3])
+        SetChannel(soundTarget.channelKey, soundTarget.label, args[3])
     elseif soundTarget and sub == "volume" and args[3] then
         local volume = tonumber(args[3])
         if volume then
@@ -637,13 +789,18 @@ SlashCmdList["PALADINSEALALERT"] = function(input)
         print(PREFIX .. textCmd.label .. "warning text updated")
     elseif cmd == "channel" and args[2] then
         -- Backward-compatible alias for "sound channel <x>".
-        db.soundChannel = args[2]
-        print(PREFIX .. "sound channel: " .. args[2])
+        SetChannel("soundChannel", "sound", args[2])
     elseif cmd == "warn" and args[2] then
         local seconds = tonumber(args[2])
         if seconds then
             db.warnBeforeSeconds = seconds
             print(PREFIX .. "early warning: " .. seconds .. "s")
+        end
+    elseif cmd == "groupwarn" and args[2] then
+        local seconds = tonumber(args[2])
+        if seconds then
+            db.groupWarnBeforeSeconds = math.max(0, seconds)
+            print(PREFIX .. "party Blessing early warning: " .. db.groupWarnBeforeSeconds .. "s")
         end
     elseif cmd == "duration" and args[2] then
         local seconds = tonumber(args[2])
@@ -671,11 +828,11 @@ SlashCmdList["PALADINSEALALERT"] = function(input)
         if not dbKey then
             print(PREFIX .. "unknown click type. Available: click, ctrl, shift")
         elseif not BLESSING_SPELLS[blessingKey] then
-            print(PREFIX .. "unknown blessing. Available: kings, might, wisdom")
+            print(PREFIX .. "unknown blessing. Available: " .. table.concat(BLESSING_ORDER, ", "))
         else
             db[dbKey] = blessingKey
             if PaladinSealAlert_RefreshBlessingBindings then PaladinSealAlert_RefreshBlessingBindings() end
-            print(PREFIX .. clickKey .. "-click now casts " .. BLESSING_SPELLS[blessingKey])
+            print(PREFIX .. clickKey .. "-click now casts " .. GetBlessingSpellName(blessingKey))
         end
     elseif cmd == "status" then
         PrintStatus()
@@ -691,6 +848,9 @@ SlashCmdList["PALADINSEALALERT"] = function(input)
         for key, value in pairs(defaults) do
             db[key] = value
         end
+        -- Push the restored values out to the popups, status window and
+        -- click bindings right away instead of only after a /reload.
+        if PaladinSealAlert_ApplyAllSettings then PaladinSealAlert_ApplyAllSettings() end
         print(PREFIX .. "settings reset")
     elseif cmd == "options" then
         if PaladinSealAlert_OpenOptions then
@@ -707,6 +867,8 @@ end
 PaladinSealAlert_SoundPresetOrder = SOUND_PRESET_ORDER
 PaladinSealAlert_BlessingSpells = BLESSING_SPELLS
 PaladinSealAlert_BlessingOrder = BLESSING_ORDER
+PaladinSealAlert_GetBlessingSpellName = GetBlessingSpellName
+PaladinSealAlert_IsPaladin = IsPlayerPaladin
 PaladinSealAlert_TriggerTest = function() TriggerAlert(PaladinSealAlertDB.msgExpired) end
 PaladinSealAlert_TriggerGroupTest = function()
     TriggerAlert(FormatGroupMessage(PaladinSealAlertDB.msgGroupExpired, UnitName("player")), true)
@@ -749,7 +911,8 @@ function PaladinSealAlert_GetStatusSnapshot()
                 buffIcon = state and state.icon or nil,
                 otherBuffIcon = state and state.otherIcon or nil,
                 class = classToken,
-                online = UnitIsConnected(unit),
+                online = SafeUnitCheck(UnitIsConnected, unit, true),
+                dead = SafeUnitCheck(UnitIsDeadOrGhost, unit, false),
                 outOfRange = outOfRange,
             })
         end
