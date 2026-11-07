@@ -67,6 +67,7 @@ local defaults = {
     blessingCtrlKey = "might",
     blessingShiftKey = "wisdom",
     groupWarnBeforeSeconds = 10,   -- early warning for party Blessings (they last minutes, so 3s is too late to rebuff); 0 disables it
+    disableInPvP = true,           -- pause everything in battlegrounds and arenas, where aura data stays hidden the whole time
     enableAuraWatch = true,
     msgAuraExpired = "AURA NOT ACTIVE",
     msgAuraWarning = "",
@@ -305,6 +306,17 @@ local function AurasAreSecret()
     return false
 end
 
+-- Did the player cast this aura? sourceUnit alone isn't reliable — after a
+-- teleport it can come back empty for your own buffs, which made your
+-- Aura/Blessings read as someone else's. isFromPlayerOrPlayerPet is the
+-- client's own flag for exactly this question, so it's checked first.
+local function IsAuraFromUnit(aura, sourceUnit)
+    if sourceUnit == "player" and aura.isFromPlayerOrPlayerPet then
+        return true
+    end
+    return aura.sourceUnit and UnitIsUnit(aura.sourceUnit, sourceUnit) or false
+end
+
 -- sourceUnit, if given, only matches auras YOU cast — otherwise any
 -- paladin's Blessing on someone reads as "buffed", even if yours fell off.
 local function FindAuraMatching(unit, matcher, sourceUnit)
@@ -316,7 +328,7 @@ local function FindAuraMatching(unit, matcher, sourceUnit)
         local ok, aura = pcall(GetAuraData, unit, index)
         if not ok or not aura then break end
         if MatchesAura(aura.name, matcher) then
-            if not sourceUnit or (aura.sourceUnit and UnitIsUnit(aura.sourceUnit, sourceUnit)) then
+            if not sourceUnit or IsAuraFromUnit(aura, sourceUnit) then
                 return aura
             end
         end
@@ -336,7 +348,7 @@ local function FindAuraMatchingOtherSource(unit, matcher, excludeSourceUnit)
         local ok, aura = pcall(GetAuraData, unit, index)
         if not ok or not aura then break end
         if MatchesAura(aura.name, matcher) then
-            if not (aura.sourceUnit and UnitIsUnit(aura.sourceUnit, excludeSourceUnit)) then
+            if not IsAuraFromUnit(aura, excludeSourceUnit) then
                 return aura
             end
         end
@@ -363,8 +375,12 @@ end
 -- Alert state machine
 -- ---------------------------------------------------------------------------
 
+-- True while paused in a battleground/arena (see UpdatePvPSuspension).
+local pvpSuspended = false
+
 local function TriggerAlert(message, isGroup)
     local db = PaladinSealAlertDB
+    if pvpSuspended then return end
     if db.enableSound then
         PlayConfiguredSound(isGroup)
     end
@@ -401,7 +417,23 @@ local function PassesThrottle(state, fieldKey)
     return true
 end
 
+-- Right after a loading screen (hearthstone, portal, instance, login) the
+-- client briefly reports no auras at all — even ones that are up — so a
+-- scan in that window would read every buff as "fell off". Until this
+-- time passes, a missing buff is ignored instead of alerting; anything
+-- that's still missing afterwards gets its alert as usual.
+local LOADING_GRACE_SECONDS = 5
+local ignoreMissingUntil = 0
+local loadingScreenActive = false
+
+local function StartLoadingGrace()
+    ignoreMissingUntil = GetTime() + LOADING_GRACE_SECONDS
+end
+
 local function UpdateBuffState(state, aura, warnBeforeSeconds, onWarning, onExpired)
+    if not aura and (loadingScreenActive or GetTime() < ignoreMissingUntil) then
+        return
+    end
     if aura then
         local signature = aura.name .. tostring(aura.expirationTime)
         if signature ~= state.signature then
@@ -448,6 +480,41 @@ end
 local GROUP_UNITS = { "player", "party1", "party2", "party3", "party4" }
 local groupState = {}
 
+-- The party usually gets buffed back-to-back, one GCD apart, so the
+-- Blessings also run out back-to-back. Alerts are held for a moment and
+-- fired as one ("Blessing expired: A, B, C") instead of a banner and a
+-- sound per person. Each new name extends the wait by GROUP_ALERT_DEBOUNCE,
+-- but never past GROUP_ALERT_MAX_WAIT from the first one.
+local GROUP_ALERT_DEBOUNCE = 2
+local GROUP_ALERT_MAX_WAIT = 6
+local groupAlertBatches = {
+    expired = { templateKey = "msgGroupExpired", names = {}, seen = {} },
+    warning = { templateKey = "msgGroupWarning", names = {}, seen = {} },
+}
+
+local function FlushGroupAlerts(kind)
+    local batch = groupAlertBatches[kind]
+    local names = batch.names
+    batch.names, batch.seen, batch.firstAt, batch.timer = {}, {}, nil, nil
+    if #names > 0 then
+        TriggerAlert(FormatGroupMessage(PaladinSealAlertDB[batch.templateKey], table.concat(names, ", ")), true)
+    end
+end
+
+local function QueueGroupAlert(kind, name)
+    local batch = groupAlertBatches[kind]
+    if not batch.seen[name] then
+        batch.seen[name] = true
+        table.insert(batch.names, name)
+    end
+
+    local now = GetTime()
+    batch.firstAt = batch.firstAt or now
+    if batch.timer then batch.timer:Cancel() end
+    local delay = math.max(0, math.min(GROUP_ALERT_DEBOUNCE, batch.firstAt + GROUP_ALERT_MAX_WAIT - now))
+    batch.timer = C_Timer.NewTimer(delay, function() FlushGroupAlerts(kind) end)
+end
+
 local function ScanGroupBlessings()
     local db = PaladinSealAlertDB
     if not db.enableGroupBlessingWatch then return end
@@ -478,8 +545,8 @@ local function ScanGroupBlessings()
                 state.otherIcon = otherAura and otherAura.icon or nil
 
                 UpdateBuffState(state, aura, db.groupWarnBeforeSeconds or db.warnBeforeSeconds,
-                    function() TriggerAlert(FormatGroupMessage(db.msgGroupWarning, name), true) end,
-                    function() TriggerAlert(FormatGroupMessage(db.msgGroupExpired, name), true) end)
+                    function() QueueGroupAlert("warning", name) end,
+                    function() QueueGroupAlert("expired", name) end)
             end
         end
     end
@@ -544,6 +611,7 @@ local function ProcessSelfWatch(watch)
 end
 
 local function OnTick()
+    if pvpSuspended then return end
     if AurasAreSecret() then
         -- Buff tracking is silently paused for the duration of combat (see
         -- AurasAreSecret) and resumes on its own once combat ends.
@@ -562,6 +630,60 @@ local function OnTick()
         end
     end
     ScanGroupBlessings()
+end
+
+-- Battlegrounds and arenas keep aura data hidden from addons the whole
+-- time, not just in combat, so the addon would sit there looking stuck in
+-- "(combat)". With disableInPvP on, it pauses there entirely: no scans, no
+-- alerts, status window hidden. State is cleared on the way in, so leaving
+-- the BG doesn't fire "expired" for buffs that were dropped inside.
+local pvpNoticeShown = false
+
+-- Several independent checks, since which of them this client answers
+-- correctly isn't guaranteed — any one saying "battleground/arena" counts.
+local function SafeCall(func, ...)
+    if not func then return nil end
+    local ok, a, b = pcall(func, ...)
+    if ok then return a, b end
+    return nil
+end
+
+local function IsInPvPInstance()
+    local _, instanceType = SafeCall(IsInInstance)
+    if instanceType == "pvp" or instanceType == "arena" then return true, instanceType end
+    if SafeCall(UnitInBattleground, "player") then return true, "UnitInBattleground" end
+    if C_PvP then
+        if SafeCall(C_PvP.IsBattleground) then return true, "C_PvP.IsBattleground" end
+        if SafeCall(C_PvP.IsArena) then return true, "C_PvP.IsArena" end
+    end
+    return false, tostring(instanceType)
+end
+
+local lastDebugZoneInfo = nil
+
+local function UpdatePvPSuspension()
+    local db = PaladinSealAlertDB
+    local inPvP, detectedBy = IsInPvPInstance()
+    if db and db.debug and detectedBy ~= lastDebugZoneInfo then
+        lastDebugZoneInfo = detectedBy
+        print(PREFIX .. "[pvp] in battleground/arena: " .. tostring(inPvP) .. " (" .. detectedBy .. ")")
+    end
+    local shouldSuspend = (db and db.disableInPvP and inPvP) or false
+    if shouldSuspend == pvpSuspended then return end
+    pvpSuspended = shouldSuspend
+
+    if shouldSuspend then
+        for _, watch in ipairs(SELF_WATCHES) do
+            ClearBuffStateSilently(watch)
+        end
+        wipe(groupState)
+        if not pvpNoticeShown then
+            pvpNoticeShown = true
+            print(PREFIX .. "paused in battlegrounds and arenas (buff data is hidden there). "
+                .. "Type /sealalert pvp off to keep it running.")
+        end
+    end
+    if PaladinSealAlert_RefreshStatusWindowVisibility then PaladinSealAlert_RefreshStatusWindowVisibility() end
 end
 
 -- UNIT_AURA can fire many times in one frame (a whole party buffed at
@@ -589,9 +711,16 @@ local function IsPlayerPaladin()
     return select(2, UnitClass("player")) == "PALADIN"
 end
 
+-- Zone info can still be stale when PLAYER_ENTERING_WORLD fires, so the
+-- battleground check is also repeated on every tick (it's cheap).
+local function OnWatchTick()
+    UpdatePvPSuspension()
+    OnTick()
+end
+
 local function StartWatching()
     if ticker then return end
-    ticker = C_Timer.NewTicker(0.5, OnTick)
+    ticker = C_Timer.NewTicker(0.5, OnWatchTick)
 end
 
 local function StopWatching()
@@ -606,14 +735,26 @@ eventFrame:RegisterEvent("PLAYER_LOGIN")
 eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 eventFrame:RegisterEvent("UNIT_AURA")
 eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
+eventFrame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+eventFrame:RegisterEvent("LOADING_SCREEN_ENABLED")
+eventFrame:RegisterEvent("LOADING_SCREEN_DISABLED")
 eventFrame:SetScript("OnEvent", function(self, event, unit)
-    if event == "PLAYER_LOGIN" then
+    if event == "LOADING_SCREEN_ENABLED" then
+        loadingScreenActive = true
+    elseif event == "LOADING_SCREEN_DISABLED" then
+        loadingScreenActive = false
+        StartLoadingGrace()
+    elseif event == "PLAYER_LOGIN" then
         InitDB()
         ResolveLocalizedSpellNames()
         if IsPlayerPaladin() then
             print(PREFIX .. "loaded. Type /sealalert help for options.")
         end
+    elseif event == "ZONE_CHANGED_NEW_AREA" then
+        UpdatePvPSuspension()
     elseif event == "PLAYER_ENTERING_WORLD" then
+        StartLoadingGrace()
+        UpdatePvPSuspension()
         if IsPlayerPaladin() then
             StartWatching()
         else
@@ -676,6 +817,7 @@ local function PrintHelp()
     print("  /sealalert auratext expired|warning <text> — Aura alert text")
     print("  /sealalert testaura — test the Aura alert")
     print("  /sealalert group on|off — toggle watching party members' Blessings")
+    print("  /sealalert pvp on|off — pause the addon in battlegrounds and arenas (on by default)")
     print("  /sealalert statuswindow on|off — toggle the status window (who lacks a Blessing, Righteous Fury up?)")
     print("  /sealalert scale <0.6-1.6> — resize the status window")
     print("  /sealalert icons on|off — show icons instead of text labels on the status window badges")
@@ -706,6 +848,8 @@ local function PrintStatus()
     print("  party row clicks: click=" .. db.blessingPlainKey .. ", ctrl=" .. db.blessingCtrlKey .. ", shift=" .. db.blessingShiftKey)
     print("  Righteous Fury watch: " .. (db.enableRighteousFuryWatch and "on" or "off"))
     print("  Aura watch: " .. (db.enableAuraWatch and "on" or "off"))
+    print("  pause in battlegrounds/arenas: " .. (db.disableInPvP and "on" or "off")
+        .. (pvpSuspended and " (paused now)" or ""))
     print("  group blessing watch: " .. (db.enableGroupBlessingWatch and "on" or "off") ..
         ", channel: " .. db.groupSoundChannel .. ", volume: " .. db.groupSoundVolume .. "%" ..
         ", preset: " .. db.groupSoundPreset)
@@ -722,6 +866,8 @@ local TOGGLE_COMMANDS = {
     rf = { dbKey = "enableRighteousFuryWatch", label = "Righteous Fury watch" },
     aura = { dbKey = "enableAuraWatch", label = "Aura watch" },
     group = { dbKey = "enableGroupBlessingWatch", label = "group blessing watch" },
+    pvp = { dbKey = "disableInPvP", label = "pause in battlegrounds/arenas",
+        onChange = function() UpdatePvPSuspension() end },
     statuswindow = { dbKey = "showStatusWindow", label = "status window",
         onChange = function()
             if PaladinSealAlert_RefreshStatusWindowVisibility then PaladinSealAlert_RefreshStatusWindowVisibility() end
@@ -869,6 +1015,8 @@ PaladinSealAlert_BlessingSpells = BLESSING_SPELLS
 PaladinSealAlert_BlessingOrder = BLESSING_ORDER
 PaladinSealAlert_GetBlessingSpellName = GetBlessingSpellName
 PaladinSealAlert_IsPaladin = IsPlayerPaladin
+PaladinSealAlert_IsSuspended = function() return pvpSuspended end
+PaladinSealAlert_UpdatePvPSuspension = UpdatePvPSuspension
 PaladinSealAlert_TriggerTest = function() TriggerAlert(PaladinSealAlertDB.msgExpired) end
 PaladinSealAlert_TriggerGroupTest = function()
     TriggerAlert(FormatGroupMessage(PaladinSealAlertDB.msgGroupExpired, UnitName("player")), true)

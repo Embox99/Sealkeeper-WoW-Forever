@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.4.1
+
+### Fixed
+- **False "Aura not active" / "Blessing expired" after a hearthstone, portal or any loading screen.** For a few seconds after loading, the client may report no auras, or forget who cast them. Missing buffs are now ignored for 5 seconds after a loading screen, and your own buffs are recognised by the client's "cast by you" flag, not only by caster unit.
+
+### Added
+- **One alert for the whole party.** When several Blessings run out together, you get one banner and one sound, "Blessing expired: A, B, C", instead of one per person.
+- **Pauses in battlegrounds and arenas.** Buff data is hidden there the whole time, so the addon used to sit stuck in "(combat)". Inside BGs and arenas it now stops scanning and alerting and hides the status window, then resumes when you leave. You can turn this off in settings or with `/sealalert pvp off`.
+- **Addon menu button** (by the minimap): left-click opens settings, right-click shows/hides the status window.
+
 ## v1.4.0
 
 ### Fixed

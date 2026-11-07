@@ -383,6 +383,13 @@ local function BuildPanel()
         function() return db.enableAuraWatch end,
         function(v) db.enableAuraWatch = v end)
     y = y - 26
+    AddCheckbox(content, "Pause in battlegrounds and arenas (buff data is hidden there)", 20, y,
+        function() return db.disableInPvP end,
+        function(v)
+            db.disableInPvP = v
+            if PaladinSealAlert_UpdatePvPSuspension then PaladinSealAlert_UpdatePvPSuspension() end
+        end)
+    y = y - 26
     AddCheckbox(content, "Show status window (who lacks a Blessing / Righteous Fury up)", 20, y,
         function() return db.showStatusWindow end,
         function(v)
@@ -1174,7 +1181,9 @@ local function RefreshStatusWindow()
 
     -- Not a secure frame, so it can come and go freely mid-fight.
     if snapshot.locked then
-        SetBarVisuals(combatRow, "(combat)", "warn")
+        -- Buff data can also be hidden outside combat (some zones keep it
+        -- hidden the whole time) — say so instead of a misleading "(combat)".
+        SetBarVisuals(combatRow, InCombat() and "(combat)" or "(buffs hidden)", "warn")
         combatRow:Show()
     else
         combatRow:Hide()
@@ -1198,8 +1207,10 @@ function PaladinSealAlert_RefreshStatusWindowVisibility()
     -- Party Blessing tracking means nothing on other classes — keep the
     -- window out of the way on alts even though the addon is enabled.
     local isPaladin = not PaladinSealAlert_IsPaladin or PaladinSealAlert_IsPaladin()
+    -- Also hidden while paused in a battleground/arena (see Core.lua).
+    local suspended = PaladinSealAlert_IsSuspended and PaladinSealAlert_IsSuspended()
     RunOutOfCombat("visibility", function()
-        if db.showStatusWindow and isPaladin then
+        if db.showStatusWindow and isPaladin and not suspended then
             statusWindow:Show()
             RefreshStatusWindow()
         else
@@ -1248,3 +1259,31 @@ statusWindowInit:SetScript("OnEvent", function()
     -- player's own choices now.
     PaladinSealAlert_RefreshBlessingBindings()
 end)
+
+-- ---------------------------------------------------------------------------
+-- Addon Compartment (the addon menu button by the minimap) — wired up
+-- through the AddonCompartmentFunc* lines in the TOC, no library needed.
+-- Left click opens the settings, right click shows/hides the status window.
+-- ---------------------------------------------------------------------------
+
+function PaladinSealAlert_OnAddonCompartmentClick(addonName, mouseButton)
+    local db = PaladinSealAlertDB
+    if mouseButton == "RightButton" and db then
+        db.showStatusWindow = not db.showStatusWindow
+        PaladinSealAlert_RefreshStatusWindowVisibility()
+    else
+        PaladinSealAlert_OpenOptions()
+    end
+end
+
+function PaladinSealAlert_OnAddonCompartmentEnter(addonName, menuButtonFrame)
+    GameTooltip:SetOwner(menuButtonFrame, "ANCHOR_LEFT")
+    GameTooltip:SetText("Sealkeeper: Forever")
+    GameTooltip:AddLine("Left-click: open settings", 1, 1, 1)
+    GameTooltip:AddLine("Right-click: show/hide status window", 1, 1, 1)
+    GameTooltip:Show()
+end
+
+function PaladinSealAlert_OnAddonCompartmentLeave()
+    GameTooltip:Hide()
+end
