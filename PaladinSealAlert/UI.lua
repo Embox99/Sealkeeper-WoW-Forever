@@ -752,9 +752,9 @@ if contextMenu.SetBackdrop then
 end
 contextMenu:Hide()
 
--- Catches a click anywhere else on screen to close the menu, since it's
--- plain Frames/Buttons (not Blizzard's menu system — see the dropdown note
--- in the options panel above for why).
+-- Catches a click anywhere else on screen to close the menu, since it's a
+-- plain Frame (not Blizzard's menu system — see the dropdown note in the
+-- options panel above for why).
 local menuCatcher = CreateFrame("Button", nil, UIParent)
 menuCatcher:SetAllPoints(UIParent)
 menuCatcher:SetFrameStrata("TOOLTIP")
@@ -858,8 +858,10 @@ local RF_ICON = "Interface\\Icons\\Spell_Holy_SealOfFury"
 local DEFAULT_SEAL_ICON = "Interface\\Icons\\Spell_Holy_SealOfWrath"
 local DEFAULT_AURA_ICON = "Interface\\Icons\\Spell_Holy_DevotionAura"
 
+-- A Button (not a plain Frame) so the badge can carry a secure cast
+-- attribute (Righteous Fury) or open a pick-one menu (Seal/Aura) on click.
 local function CreateBadge(label)
-    local badge = CreateFrame("Frame", nil, statusWindow, "BackdropTemplate")
+    local badge = CreateFrame("Button", nil, statusWindow, "SecureActionButtonTemplate, BackdropTemplate")
     badge:SetSize(BADGE_WIDTH, BADGE_HEIGHT)
     if badge.SetBackdrop then
         badge:SetBackdrop({
@@ -890,6 +892,15 @@ end
 local sealBadge = CreateBadge("Seal")
 local rfBadge = CreateBadge("RF")
 local auraBadge = CreateBadge("Aura")
+
+-- All three badges are status-only (clicking to cast never worked
+-- reliably on this client, for any of the three — removed). They're still
+-- mouse-enabled Buttons, so a right-click on one would otherwise never
+-- reach statusWindow's own OnMouseUp — same reasoning as the party rows
+-- (see OnRightClickOpenMenu above) — hence the hookup below.
+rfBadge:HookScript("OnMouseUp", OnRightClickOpenMenu)
+sealBadge:HookScript("OnMouseUp", OnRightClickOpenMenu)
+auraBadge:HookScript("OnMouseUp", OnRightClickOpenMenu)
 
 local function SetBadgeStatus(badge, up, iconPath)
     local c = up and COLOR_OK or COLOR_BAD
@@ -1034,6 +1045,22 @@ local function CreateBarRowForUnit(unit)
     -- right-click here never reaches statusWindow's own OnMouseUp — hook it
     -- straight onto the row too (see OnRightClickOpenMenu above).
     row:HookScript("OnMouseUp", OnRightClickOpenMenu)
+
+    -- A real aura scan can't confirm the Blessing landed while aura data is
+    -- hidden (combat) — mark it up on the strength of the click itself, same
+    -- as PriestShieldVisual assumes its shield landed the moment it's cast.
+    -- Left-click only: right-click here is the context menu, not a cast.
+    -- The held modifier says which Blessing the macro just cast (we built
+    -- it), so the status window can show its actual icon right away.
+    row:SetScript("PostClick", function(self, button)
+        if button ~= "LeftButton" or not PaladinSealAlert_OptimisticBlessingCast then return end
+        local db = PaladinSealAlertDB
+        local bindingKey = IsShiftKeyDown() and "blessingShiftKey"
+            or IsControlKeyDown() and "blessingCtrlKey"
+            or "blessingPlainKey"
+        local icon = PaladinSealAlert_GetBlessingIcon and db and PaladinSealAlert_GetBlessingIcon(db[bindingKey])
+        PaladinSealAlert_OptimisticBlessingCast(unit, icon)
+    end)
 
     return row
 end

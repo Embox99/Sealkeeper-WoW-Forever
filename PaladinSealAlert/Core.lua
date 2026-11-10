@@ -217,6 +217,21 @@ local function GetSpellNameByID(spellID)
     return nil
 end
 
+-- Static spell data (not a live combat read), so readable even when the
+-- aura itself can't be — lets an optimistic cast show the right icon
+-- immediately instead of whatever was cached from before.
+local function GetSpellIconByID(spellID)
+    if C_Spell and C_Spell.GetSpellTexture then
+        local ok, icon = pcall(C_Spell.GetSpellTexture, spellID)
+        if ok and icon then return icon end
+    end
+    if GetSpellTexture then
+        local ok, icon = pcall(GetSpellTexture, spellID)
+        if ok and icon then return icon end
+    end
+    return nil
+end
+
 local SEAL_MATCHER = {
     patterns = { "^Seal of ", "^Печать " },
     -- Righteousness (both rank-1 IDs seen across versions), Crusader,
@@ -288,6 +303,14 @@ local function SafeUnitCheck(func, unit, fallback)
     local ok, result = pcall(function() return func(unit) and true or false end)
     if ok then return result end
     return fallback
+end
+
+-- The client's own way to ask "is this particular value one I'm not allowed
+-- to look at" (the anti-automation system) — same thing addons like
+-- Formwise and PriestShieldVisual use instead of pcall-catching the error
+-- that comes from testing a secret value directly.
+local function IsSecretValue(value)
+    return type(issecretvalue) == "function" and issecretvalue(value)
 end
 
 local function GetBlessingSpellName(key)
@@ -462,6 +485,13 @@ local function UpdateBuffState(state, aura, warnBeforeSeconds, onWarning, onExpi
     end
 end
 
+-- Forward-declared: the Seal re-cast timer below is assigned once
+-- RestartSealClickTimer exists, but ClearBuffStateSilently (defined here,
+-- used earlier in the file than that) needs to cancel it too whenever a
+-- Seal watch is wiped outright (death, PvP suspend) so a stale timer can't
+-- fire a false "fell off" alert afterwards.
+local sealClickTimer = nil
+
 -- Forget a buff without alerting — used when it's gone for a reason that
 -- isn't worth an alert (death wipes every buff at once).
 local function ClearBuffStateSilently(state)
@@ -469,6 +499,11 @@ local function ClearBuffStateSilently(state)
     state.signature = nil
     state.warned = false
     state.icon = nil
+    state.auraInstanceID = nil
+    if state.key == "seal" and sealClickTimer then
+        sealClickTimer:Cancel()
+        sealClickTimer = nil
+    end
 end
 
 -- ---------------------------------------------------------------------------
@@ -565,6 +600,40 @@ local function PruneGroupState()
     end
 end
 
+-- Called right after a click-cast row fires (see UI.lua's row PostClick).
+-- A real aura scan can't confirm the Blessing landed while the client is
+-- hiding aura data (combat), so this marks it as up on the strength of the
+-- click itself instead — the same "assume it from the cast, let the next
+-- readable scan correct it" trick PriestShieldVisual uses for Power Word:
+-- Shield. A guid we don't know yet (first cast on them this session) gets a
+-- fresh state; ScanGroupBlessings reconciles it as soon as a scan can run.
+-- unit: any real unit token (party1, target, player, ...) — resolved to a
+-- GUID right away, so it doesn't matter which token named them.
+-- icon (optional): the Blessing's own texture, when the caller already
+-- knows which one was cast, instead of leaving whatever was there before.
+function PaladinSealAlert_OptimisticBlessingCast(unit, icon)
+    local guid = UnitExists(unit) and UnitGUID(unit)
+    if not guid then return end
+    local state = groupState[guid]
+    if not state then
+        state = { has = false, signature = nil, warned = false }
+        groupState[guid] = state
+    end
+    state.has = true
+    state.signature = "optimistic:" .. tostring(GetTime())
+    state.warned = false
+    if icon then
+        state.icon = icon
+    end
+end
+
+-- icon for a Blessing picked from the status window's own binding keys
+-- ("kings" etc) — UI.lua doesn't have the spell IDs, Core.lua does.
+function PaladinSealAlert_GetBlessingIcon(blessingKey)
+    local spellID = blessingKey and BLESSING_SPELL_IDS[blessingKey]
+    return spellID and GetSpellIconByID(spellID)
+end
+
 -- ---------------------------------------------------------------------------
 -- Self-buff watches (seal, Righteous Fury, ...). Same fall-off/early-warning
 -- state machine, parameterized so adding another watched self-buff is just
@@ -572,15 +641,15 @@ end
 -- ---------------------------------------------------------------------------
 
 local SELF_WATCHES = {
-    { key = "seal", find = FindActiveSeal, enabledKey = nil,
+    { key = "seal", find = FindActiveSeal, enabledKey = nil, matcher = SEAL_MATCHER,
       msgExpiredKey = "msgExpired", msgWarningKey = "msgWarning",
-      has = false, signature = nil, warned = false },
-    { key = "rf", find = FindActiveRighteousFury, enabledKey = "enableRighteousFuryWatch",
+      has = false, signature = nil, warned = false, auraInstanceID = nil },
+    { key = "rf", find = FindActiveRighteousFury, enabledKey = "enableRighteousFuryWatch", matcher = RIGHTEOUS_FURY_MATCHER,
       msgExpiredKey = "msgRFExpired", msgWarningKey = "msgRFWarning",
-      has = false, signature = nil, warned = false },
-    { key = "aura", find = FindActiveAura, enabledKey = "enableAuraWatch",
+      has = false, signature = nil, warned = false, auraInstanceID = nil },
+    { key = "aura", find = FindActiveAura, enabledKey = "enableAuraWatch", matcher = AURA_MATCHER,
       msgExpiredKey = "msgAuraExpired", msgWarningKey = "msgAuraWarning",
-      has = false, signature = nil, warned = false },
+      has = false, signature = nil, warned = false, auraInstanceID = nil },
 }
 
 local function GetSelfWatch(key)
@@ -588,6 +657,157 @@ local function GetSelfWatch(key)
         if watch.key == key then return watch end
     end
     return nil
+end
+
+-- A plain re-cast reminder, independent of aura scanning entirely: every
+-- Seal cast restarts a 30s countdown; if no further Seal cast refreshes it
+-- in time, alert. If one does, the countdown just restarts. This runs
+-- always (combat or not) — it's tracking clicks, not the real buff state.
+local SEAL_CLICK_TIMEOUT_SECONDS = 30
+
+local function CancelSealClickTimer()
+    if sealClickTimer then
+        sealClickTimer:Cancel()
+        sealClickTimer = nil
+    end
+end
+
+local function OnSealClickTimeout()
+    sealClickTimer = nil
+    local watch = GetSelfWatch("seal")
+    if not watch then return end
+    if watch.has and PassesThrottle(watch, "lastExpireAlert") then
+        TriggerAlert(PaladinSealAlertDB[watch.msgExpiredKey])
+    end
+    watch.has = false
+    watch.signature = nil
+    watch.warned = false
+    watch.icon = nil
+    watch.auraInstanceID = nil
+end
+
+local function RestartSealClickTimer()
+    CancelSealClickTimer()
+    sealClickTimer = C_Timer.NewTimer(SEAL_CLICK_TIMEOUT_SECONDS, OnSealClickTimeout)
+end
+
+-- A manual cancel (right-click your own buff icon to remove it) during
+-- combat used to go completely unnoticed: the regular scan is blocked by
+-- AurasAreSecret, and nothing else told us it happened. UNIT_AURA's own
+-- event payload turns out to still carry plain (non-secret) instance IDs
+-- for your own added/removed auras even then — this is the same trick
+-- PriestShieldVisual uses — so instead of scanning, we diff that payload
+-- directly: remember the auraInstanceID of each watched buff while we can
+-- still scan normally, then watch for that exact ID showing up in a later
+-- removedAuraInstanceIDs list, combat or not.
+local function HandleWatchAuraRemoved(watch)
+    if watch.has and PassesThrottle(watch, "lastExpireAlert") then
+        TriggerAlert(PaladinSealAlertDB[watch.msgExpiredKey])
+    end
+    watch.has = false
+    watch.signature = nil
+    watch.warned = false
+    watch.icon = nil
+    watch.auraInstanceID = nil
+    if watch.key == "seal" then
+        CancelSealClickTimer()
+    end
+end
+
+local function OnPlayerAuraUpdate(updateInfo)
+    local db = PaladinSealAlertDB
+    if IsSecretValue(updateInfo) or type(updateInfo) ~= "table" then return end
+
+    local removed = updateInfo.removedAuraInstanceIDs
+    if not IsSecretValue(removed) and type(removed) == "table" then
+        for _, id in ipairs(removed) do
+            if not IsSecretValue(id) then
+                for _, watch in ipairs(SELF_WATCHES) do
+                    if watch.auraInstanceID and watch.auraInstanceID == id then
+                        HandleWatchAuraRemoved(watch)
+                    end
+                end
+            end
+        end
+    end
+
+    -- Also pick up newly-added auras this way — a second, independent path
+    -- to the same optimistic "it's up" marking OnPlayerCastSucceeded does,
+    -- and the only way to learn this buff's auraInstanceID before combat
+    -- scanning is possible again (needed for the removal check above).
+    local added = updateInfo.addedAuras
+    if not IsSecretValue(added) and type(added) == "table" then
+        for _, aura in ipairs(added) do
+            if not IsSecretValue(aura) then
+                local spellID, auraInstanceID = aura.spellId, aura.auraInstanceID
+                if not IsSecretValue(spellID) and not IsSecretValue(auraInstanceID) then
+                    local name = GetSpellNameByID(spellID)
+                    if name then
+                        for _, watch in ipairs(SELF_WATCHES) do
+                            if (not watch.enabledKey or db[watch.enabledKey]) and MatchesAura(name, watch.matcher) then
+                                watch.auraInstanceID = auraInstanceID
+                                watch.has = true
+                                watch.signature = "optimistic:" .. tostring(GetTime())
+                                watch.warned = false
+                                watch.icon = GetSpellIconByID(spellID) or watch.icon
+                                if watch.key == "seal" then
+                                    RestartSealClickTimer()
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- A manual cancel (clicking your own buff to remove it) mid-fight turned
+-- out to be undetectable on this client by any safe means: UNIT_AURA
+-- simply never fires for it, a direct per-ID re-check afterwards
+-- (C_UnitAuras.GetAuraDataByAuraInstanceID) is itself a protected call
+-- here and throws "Interface action failed because of an AddOn", and even
+-- just hooking CancelUnitBuff via hooksecurefunc — normally guaranteed
+-- taint-free on retail — triggers the same error on this client. All
+-- three were tried and ruled out; there's no remaining safe way to catch
+-- this specific action while still in combat. It still gets caught
+-- immediately once combat ends, via the normal scan a tick later.
+
+-- Mirrors PaladinSealAlert_OptimisticBlessingCast, for your own Seal/RF/Aura:
+-- a successful cast of one marks it up immediately, rather than waiting for
+-- a scan that's blocked for the rest of the fight. spellID is resolved to a
+-- name and matched the same way aura names are (GetSpellName is static
+-- spell data, not a live combat read, so it stays readable in combat; the
+-- spellID itself is what gets secret-wrapped, hence the IsSecretValue guard).
+local function OnPlayerCastSucceeded(spellID)
+    if IsSecretValue(spellID) or type(spellID) ~= "number" then return end
+    local name = GetSpellNameByID(spellID)
+    if not name then return end
+    local db = PaladinSealAlertDB
+    for _, watch in ipairs(SELF_WATCHES) do
+        if (not watch.enabledKey or db[watch.enabledKey]) and MatchesAura(name, watch.matcher) then
+            watch.has = true
+            watch.signature = "optimistic:" .. tostring(GetTime())
+            watch.warned = false
+            watch.icon = GetSpellIconByID(spellID) or watch.icon
+            if watch.key == "seal" then
+                RestartSealClickTimer()
+            end
+        end
+    end
+
+    -- Same trick for a Blessing cast the normal way (action bar, keybind,
+    -- macro — anything other than our own click-cast rows, which already
+    -- mark this via PostClick). Whoever's currently targeted, if that's you
+    -- or a party member, is who it landed on; with no such target it must
+    -- have been a self-cast.
+    if MatchesAura(name, BLESSING_MATCHER) then
+        local unit = "player"
+        if UnitExists("target") and (UnitIsUnit("target", "player") or UnitInParty("target")) then
+            unit = "target"
+        end
+        PaladinSealAlert_OptimisticBlessingCast(unit, GetSpellIconByID(spellID))
+    end
 end
 
 local function ProcessSelfWatch(watch)
@@ -602,8 +822,12 @@ local function ProcessSelfWatch(watch)
 
     -- Cache the aura's own icon so the status window can show it instead of
     -- a plain text label (each Seal/Aura variant has a different icon).
+    -- Also cache its auraInstanceID — the only thing that still reliably
+    -- identifies "this exact buff" once combat starts and a real scan is
+    -- no longer possible (see OnPlayerAuraUpdate below).
     local aura = watch.find()
     watch.icon = aura and aura.icon or nil
+    watch.auraInstanceID = aura and aura.auraInstanceID or nil
 
     UpdateBuffState(watch, aura, db.warnBeforeSeconds,
         function() TriggerAlert(db[watch.msgWarningKey]) end,
@@ -738,7 +962,8 @@ eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
 eventFrame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
 eventFrame:RegisterEvent("LOADING_SCREEN_ENABLED")
 eventFrame:RegisterEvent("LOADING_SCREEN_DISABLED")
-eventFrame:SetScript("OnEvent", function(self, event, unit)
+eventFrame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
+eventFrame:SetScript("OnEvent", function(self, event, unit, updateInfo, spellID)
     if event == "LOADING_SCREEN_ENABLED" then
         loadingScreenActive = true
     elseif event == "LOADING_SCREEN_DISABLED" then
@@ -761,11 +986,23 @@ eventFrame:SetScript("OnEvent", function(self, event, unit)
             StopWatching()
         end
     elseif event == "UNIT_AURA" then
-        if IsPlayerPaladin() and (unit == "player" or (unit and unit:match("^party%d$"))) then
-            RequestScan()
+        if IsPlayerPaladin() then
+            if unit == "player" then
+                -- Combat-safe path: catches your own manual buff cancels
+                -- (and casts) immediately, even while the regular scan
+                -- below is blocked for the rest of the fight.
+                OnPlayerAuraUpdate(updateInfo)
+            end
+            if unit == "player" or (unit and unit:match("^party%d$")) then
+                RequestScan()
+            end
         end
     elseif event == "GROUP_ROSTER_UPDATE" then
         PruneGroupState()
+    elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
+        if IsPlayerPaladin() then
+            OnPlayerCastSucceeded(spellID)
+        end
     end
 end)
 
@@ -1042,16 +1279,15 @@ function PaladinSealAlert_GetStatusSnapshot()
                 classToken = select(2, UnitClass(unit))
             end
             -- UnitInRange's results are "secret" values on this client (same
-            -- anti-automation system as aura reads) — booleans that throw if
-            -- you test them directly. Wrapped in pcall; if it throws, we
-            -- just can't tell and assume in-range rather than block casts.
+            -- anti-automation system as aura reads). If either came back
+            -- secret, we just can't tell — assume in-range rather than
+            -- block casts on a guess.
             local outOfRange = false
-            pcall(function()
-                local inRange, rangeChecked = UnitInRange(unit)
-                if rangeChecked and not inRange then
-                    outOfRange = true
-                end
-            end)
+            local inRange, rangeChecked = UnitInRange(unit)
+            if not IsSecretValue(inRange) and not IsSecretValue(rangeChecked)
+                and rangeChecked and not inRange then
+                outOfRange = true
+            end
             table.insert(members, {
                 unit = unit,
                 name = UnitName(unit) or unit,

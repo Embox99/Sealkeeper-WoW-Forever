@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.5.0
+
+### Added
+- **Combat-safe Seal / Righteous Fury / Aura tracking.** Casting (or re-casting) one now marks it up the moment the cast succeeds, instead of waiting for a buff scan that combat hides for the rest of the fight.
+- **Seal re-cast reminder.** Every Seal cast starts a 30-second countdown; recast before it runs out and it just restarts, let it run out and you get the usual "Seal expired" alert — a backstop for exactly the situations a real scan can't reach you.
+- **Blessings cast from your own action bar (not just a click-cast row) now update party tracking too**, based on whoever you're currently targeting.
+
 ## v1.4.1
 
 ### Fixed
