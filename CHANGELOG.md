@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.6.0
+
+### Added
+- **Partial pause in battlegrounds/arenas.** Only party Blessing tracking turns off there now — it genuinely needs aura reads on other people, which stay hidden the whole time. Your own Seal, Righteous Fury and Aura keep tracking and alerting the same combat-safe way they already do mid-fight. Dying in a BG now correctly clears them too (previously that only worked outside BGs).
+- **Righteous Fury gets the same combat-safe re-cast tracking as the Seal**, using its real 30-minute duration on this client — alerts if you haven't recast it in time.
+- **Redesigned status window header.** The Seal is now a larger centered icon with a cooldown-style sweep and countdown (visualizing its 30s re-cast reminder); Righteous Fury and Aura sit below as small badges. The window also shrinks to fit when party tracking is off (e.g. in a BG) instead of showing empty rows.
+
+### Changed
+- Status borders are a thinner, softer green/red instead of the old square frame (which rendered as broken corner brackets on this client), and the window's own border is tinted warm instead of flat grey.
+
 ## v1.5.0
 
 ### Added

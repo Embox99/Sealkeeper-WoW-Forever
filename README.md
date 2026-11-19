@@ -10,7 +10,7 @@ Stop staring at your buff bar. **Sealkeeper: Forever** is a Paladin addon built 
 
 - **Seal / Righteous Fury / Aura alerts** — a popup banner and/or sound the instant one of these drops off, with an optional early warning a few seconds before it expires. Never get caught with a dead Seal mid-pull again.
 - **Party Blessing tracking** — tracks whether *your* Blessing specifically (not just "a" Blessing from any paladin) is up on each party member, so you always know who still needs a buff.
-- **Movable status window** — a small always-on panel with three badges (Seal / RF / Aura, icons by default, switchable to plain text) that light up red when something's missing, plus one row per party member:
+- **Movable status window** — a small always-on panel: your Seal front and center as a larger icon with a cooldown-style sweep for its re-cast reminder, Righteous Fury and Aura as small badges underneath (icons by default, switchable to plain text), each bordered green or red depending on status, plus one row per party member:
   - **Your own Blessing icon on the left** of the name, **another paladin's Blessing icon on the right** — at a glance you can tell if someone's covered, and by whom.
   - Rows turn green when the player has your Blessing, red when they don't, and grey with an **"(offline)"** or **"(out of range)"** label when you can't reach them.
   - **Click a row to cast a Blessing on that member directly** — plain click = Blessing of Kings, Ctrl-click = Might, Shift-click = Wisdom by default, and each one is reassignable in the settings panel. No targeting, no macros to set up yourself, and it never misfires onto your current target or yourself.
@@ -18,6 +18,8 @@ Stop staring at your buff bar. **Sealkeeper: Forever** is a Paladin addon built 
   - Optional minimal look — hide the title and close button, just the badges and rows:
 
     ![Minimal look](docs/status-window-minimal.png)
+- **Combat-aware tracking (since v1.5)** — casting your Seal, Righteous Fury, Aura, or a Blessing on a party member now marks it as up the instant the cast succeeds, instead of waiting for a buff scan the client blocks for the rest of the fight. Your Seal gets its own 30-second re-cast reminder, and Righteous Fury its real 30-minute one, so even when you can't confirm the exact state mid-combat, you'll still be told to refresh in time.
+- **Partial pause in battlegrounds and arenas (since v1.6)** — party Blessing tracking pauses there, since it genuinely needs aura reads on other people that stay hidden the whole match. Your own Seal, Righteous Fury and Aura keep tracking and alerting exactly like in combat, and the window shrinks to fit when there's no party list to show.
 - **Fully configurable** — pick from eight built-in alert sounds, set per-alert volume, colors, text size, and messages for every alert, all from an in-game settings panel (slash commands work too, if you prefer those).
 - **Alert throttle** — a minimum gap between repeat alerts for the same buff, so a flickering connection doesn't turn one dropped Seal into a sound-spam.
 - **Any client language** — buffs are recognised by spell, not just by English name, so alerts and click-to-cast work on German, French, Spanish, Russian, Chinese, Korean and other clients.
@@ -47,7 +49,7 @@ Type `/sealalert options` in-game to open the full settings panel, or `/sealaler
 
 This addon was built and tested during the first weeks of the WoW: Forever beta, which has a few client-side quirks worth knowing about:
 
-- **Buff reads are blocked entirely while you're in combat.** This is a deliberate client restriction (aura data is hidden from addons during combat), so the status window shows the last known state instead of live data until combat ends. Click-to-cast still works mid-fight — it doesn't need a fresh aura read.
+- **Buff reads are blocked entirely while you're in combat.** This is a deliberate client restriction (aura data is hidden from addons during combat). Since v1.5, casting your Seal/RF/Aura or a Blessing is picked up immediately regardless, so the status window stays accurate for anything you actively (re)cast mid-fight — but a buff lost some other way (manually cancelled, dispelled, expiring on its own) still only shows up once combat ends. Click-to-cast always worked mid-fight — it doesn't need a fresh aura read.
 - **The status window and its click bindings are frozen during combat.** Its click-to-cast rows are protected frames, so rows for people who join mid-fight, binding changes, hiding and resizing all apply automatically as soon as combat ends.
 - **"Out of range" detection is best-effort.** Range checks are subject to the same anti-automation restriction as buff reads on this client, so a member who's actually out of range may not always get flagged — offline detection is unaffected and always accurate.
 - **Alert sounds are all built-in** (no custom audio files) — `PlaySoundFile` on a real external file is silently broken on this client, so every alert uses the game's own sound library instead, which doesn't hit that bug.

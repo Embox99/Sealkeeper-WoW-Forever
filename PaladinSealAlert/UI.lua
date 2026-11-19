@@ -406,7 +406,7 @@ local function BuildPanel()
         end)
     y = y - 40
 
-    AddCheckbox(content, "Use icons instead of text labels (Seal/RF/Aura badges)", 20, y,
+    AddCheckbox(content, "Use icons instead of text labels (RF/Aura badges)", 20, y,
         function() return db.statusIconLabels end,
         function(v) db.statusIconLabels = v end)
     y = y - 26
@@ -669,6 +669,9 @@ local function ApplyStatusWindowBackdrop()
         insets = { left = 3, right = 3, top = 3, bottom = 3 },
     })
     statusWindow:SetBackdropColor(0, 0, 0, 0.6)
+    -- A warm, muted tint instead of the tooltip border's default flat
+    -- grey/white, closer to the game's own parchment-and-metal UI frames.
+    statusWindow:SetBackdropBorderColor(0.55, 0.47, 0.35, 1)
 end
 ApplyStatusWindowBackdrop()
 
@@ -723,7 +726,7 @@ end
 -- when the title's hidden.
 local function GetBadgeY()
     local db = PaladinSealAlertDB
-    return (db and db.statusWindowMinimal) and -8 or -26
+    return (db and db.statusWindowMinimal) and -14 or -26
 end
 
 -- ---- Right-click context menu: size, lock/unlock, advanced settings ----
@@ -850,64 +853,131 @@ local COLOR_BAD     = { 1, 0.3, 0.3 }
 local COLOR_WARN    = { 1, 0.6, 0 }
 local COLOR_OFFLINE = { 0.55, 0.55, 0.55 }
 
--- ---- Top row: 3 small badges for Seal / Righteous Fury / Aura ----
+-- Muted versions, just for the Seal/RF/Aura icon borders — the full
+-- saturated COLOR_OK/COLOR_BAD read as neon at this size.
+local BORDER_OK  = { 0.45, 0.7, 0.45 }
+local BORDER_BAD = { 0.75, 0.4, 0.4 }
 
-local BADGE_WIDTH, BADGE_HEIGHT, BADGE_GAP = 48, 30, 4
+-- A thin 1px border built from 4 plain textures instead of a Backdrop edge
+-- — WHITE8x8 (a flat 1x1 texture never meant to be tiled) rendered as
+-- broken corner brackets when used as an edgeFile, so this sidesteps that
+-- entirely and gives a clean, reliably flat line regardless of size. Each
+-- edge stops a couple pixels short of the corner instead of meeting the
+-- next one squarely — softens the hard 90° corner a little without an
+-- actual curve, which a flat texture can't draw (that needs a real
+-- rounded-corner image asset, which this doesn't bundle any of).
+local BORDER_CORNER_INSET = 2
+
+local function CreateSoftBorder(frame)
+    local parts = {}
+    local inset = BORDER_CORNER_INSET
+    local top = frame:CreateTexture(nil, "OVERLAY")
+    top:SetPoint("TOPLEFT", frame, "TOPLEFT", inset, 0)
+    top:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -inset, 0)
+    top:SetHeight(1)
+    local bottom = frame:CreateTexture(nil, "OVERLAY")
+    bottom:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", inset, 0)
+    bottom:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -inset, 0)
+    bottom:SetHeight(1)
+    local left = frame:CreateTexture(nil, "OVERLAY")
+    left:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -inset)
+    left:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 0, inset)
+    left:SetWidth(1)
+    local right = frame:CreateTexture(nil, "OVERLAY")
+    right:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, -inset)
+    right:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, inset)
+    right:SetWidth(1)
+    parts.top, parts.bottom, parts.left, parts.right = top, bottom, left, right
+    return parts
+end
+
+local function SetSoftBorderColor(border, c)
+    border.top:SetColorTexture(c[1], c[2], c[3], 0.9)
+    border.bottom:SetColorTexture(c[1], c[2], c[3], 0.9)
+    border.left:SetColorTexture(c[1], c[2], c[3], 0.9)
+    border.right:SetColorTexture(c[1], c[2], c[3], 0.9)
+end
+
+-- ---- Top: a centered Seal ring (icon + cooldown-style swipe/countdown,
+-- driven by the 30s re-cast reminder timer), with small Righteous Fury /
+-- Aura badges centered underneath ----
+
+local SEAL_RING_SIZE, SMALL_BADGE_SIZE, HEADER_GAP, HEADER_BOTTOM_PAD = 40, 22, 6, 8
 
 local RF_ICON = "Interface\\Icons\\Spell_Holy_SealOfFury"
 local DEFAULT_SEAL_ICON = "Interface\\Icons\\Spell_Holy_SealOfWrath"
 local DEFAULT_AURA_ICON = "Interface\\Icons\\Spell_Holy_DevotionAura"
 
--- A Button (not a plain Frame) so the badge can carry a secure cast
--- attribute (Righteous Fury) or open a pick-one menu (Seal/Aura) on click.
-local function CreateBadge(label)
-    local badge = CreateFrame("Button", nil, statusWindow, "SecureActionButtonTemplate, BackdropTemplate")
-    badge:SetSize(BADGE_WIDTH, BADGE_HEIGHT)
-    if badge.SetBackdrop then
-        badge:SetBackdrop({
-            bgFile = "Interface\\Buttons\\WHITE8x8",
-            edgeFile = "Interface\\Buttons\\WHITE8x8",
-            edgeSize = 1,
-        })
-        badge:SetBackdropColor(0, 0, 0, 0.4)
-        badge:SetBackdropBorderColor(0.5, 0.5, 0.5, 1)
-    end
+-- The Seal gets its own, bigger treatment: a plain icon with Blizzard's
+-- own cooldown-swipe overlaid (CooldownFrameTemplate — the same widget
+-- action bars use), driven by PaladinSealAlert_GetWatchTimerInfo("seal")
+-- rather than a real buff duration (which combat usually hides anyway;
+-- Seal's 30s is just a re-cast reminder, not a real one). The countdown
+-- number is drawn ourselves (see sealCountdownText below) — Blizzard's
+-- own built-in number floated above the icon instead of centering on it
+-- at this size, so SetHideCountdownNumbers stays true.
+local sealIcon = CreateFrame("Frame", nil, statusWindow)
+sealIcon:SetSize(SEAL_RING_SIZE, SEAL_RING_SIZE)
+local sealTexture = sealIcon:CreateTexture(nil, "ARTWORK")
+sealTexture:SetAllPoints()
+sealTexture:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+sealIcon.texture = sealTexture
+local sealCooldown = CreateFrame("Cooldown", nil, sealIcon, "CooldownFrameTemplate")
+sealCooldown:SetAllPoints(sealTexture)
+sealCooldown:SetHideCountdownNumbers(true)
+sealCooldown:SetDrawEdge(false)
+sealIcon.cooldown = sealCooldown
+local sealCountdownText = sealIcon:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+sealCountdownText:SetPoint("BOTTOM", sealIcon, "BOTTOM", 0, 2)
+sealIcon.countdownText = sealCountdownText
+-- Thin, muted border (see CreateSoftBorder) instead of the earlier dot —
+-- green while the Seal's up, red while it isn't, no neon saturation.
+sealIcon.border = CreateSoftBorder(sealIcon)
+sealIcon:EnableMouse(true)
+sealIcon:SetScript("OnMouseUp", OnRightClickOpenMenu)
+
+-- Righteous Fury / Aura stay as small plain status badges — status-only
+-- (clicking to cast never worked reliably on this client — removed).
+local function CreateSmallBadge()
+    local badge = CreateFrame("Button", nil, statusWindow)
+    badge:SetSize(SMALL_BADGE_SIZE, SMALL_BADGE_SIZE)
+
     local text = badge:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     text:SetPoint("CENTER")
-    text:SetText(label)
     badge.text = text
 
-    -- Alternate to the text label when icon mode is on (see SetBadgeStatus).
-    -- Square and centered, not stretched to the (wider-than-tall) badge.
     local icon = badge:CreateTexture(nil, "ARTWORK")
-    icon:SetSize(BADGE_HEIGHT - 6, BADGE_HEIGHT - 6)
-    icon:SetPoint("CENTER")
-    icon:SetTexCoord(0.08, 0.92, 0.08, 0.92) -- trim the icon's built-in border art
+    icon:SetAllPoints()
+    icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
     icon:Hide()
     badge.icon = icon
 
+    badge.border = CreateSoftBorder(badge)
+
+    -- A mouse-enabled Button, so a right-click would otherwise never reach
+    -- statusWindow's own OnMouseUp — same reasoning as the party rows.
+    badge:HookScript("OnMouseUp", OnRightClickOpenMenu)
     return badge
 end
 
-local sealBadge = CreateBadge("Seal")
-local rfBadge = CreateBadge("RF")
-local auraBadge = CreateBadge("Aura")
+local rfBadge = CreateSmallBadge()
+rfBadge.text:SetText("RF")
+-- Righteous Fury does have a real 30-minute duration on this client, and
+-- the recast-reminder/alert logic for it stays (see Core.lua) — just not
+-- the cooldown-swipe visual, which didn't read well at this badge size.
+local auraBadge = CreateSmallBadge()
+auraBadge.text:SetText("Au")
 
--- All three badges are status-only (clicking to cast never worked
--- reliably on this client, for any of the three — removed). They're still
--- mouse-enabled Buttons, so a right-click on one would otherwise never
--- reach statusWindow's own OnMouseUp — same reasoning as the party rows
--- (see OnRightClickOpenMenu above) — hence the hookup below.
-rfBadge:HookScript("OnMouseUp", OnRightClickOpenMenu)
-sealBadge:HookScript("OnMouseUp", OnRightClickOpenMenu)
-auraBadge:HookScript("OnMouseUp", OnRightClickOpenMenu)
-
-local function SetBadgeStatus(badge, up, iconPath)
+-- Thin, muted border (see CreateSoftBorder) — status reads from
+-- desaturation plus that border, not a Backdrop edge (see the Seal ring's
+-- note above for why).
+local function SetSmallBadgeStatus(badge, up, iconPath)
     local c = up and COLOR_OK or COLOR_BAD
-    badge:SetBackdropBorderColor(c[1], c[2], c[3], 1)
+    SetSoftBorderColor(badge.border, up and BORDER_OK or BORDER_BAD)
 
     local db = PaladinSealAlertDB
-    if db and db.statusIconLabels and iconPath then
+    local showIcon = db and db.statusIconLabels and iconPath
+    if showIcon then
         badge.icon:SetTexture(iconPath)
         badge.icon:SetDesaturated(not up)
         badge.icon:Show()
@@ -917,17 +987,24 @@ local function SetBadgeStatus(badge, up, iconPath)
         badge.text:Show()
         badge.icon:Hide()
     end
+    -- The swipe only makes visual sense drawn over the icon, so it tracks
+    -- icon-vs-text mode too (only rfBadge has one; see its creation above).
+    if badge.cooldown then
+        badge.cooldown:SetShown(showIcon)
+    end
 
     badge:Show()
 end
 
-local function LayoutBadges(visibleBadges)
-    local x = 8
-    local badgeY = GetBadgeY()
-    for _, badge in ipairs(visibleBadges) do
+-- Centers 0-2 small badges as a unit directly under the Seal ring.
+local function LayoutSmallBadges(visible)
+    local count = #visible
+    if count == 0 then return end
+    local x = -(count * SMALL_BADGE_SIZE + (count - 1) * HEADER_GAP) / 2
+    for _, badge in ipairs(visible) do
         badge:ClearAllPoints()
-        badge:SetPoint("TOPLEFT", x, badgeY)
-        x = x + BADGE_WIDTH + BADGE_GAP
+        badge:SetPoint("TOPLEFT", sealIcon, "BOTTOM", x, -HEADER_GAP)
+        x = x + SMALL_BADGE_SIZE + HEADER_GAP
     end
 end
 
@@ -943,6 +1020,13 @@ end
 -- per-modifier macrotext, see Dcr_DebuffsFrame.lua).
 
 local BAR_HEIGHT, BAR_GAP = 20, 2
+-- The window's width is otherwise fixed (only its scale is user-adjustable
+-- — see NudgeStatusWindowScale), so these are the only two widths it ever
+-- takes: the normal one, sized for party rows, and a narrower one used
+-- only when there are no rows to show (party tracking off, e.g. in a BG).
+-- Narrow enough to hug the icons, but still wide enough for the
+-- "(buffs hidden)" note hanging below (combatRow) not to overflow it.
+local DEFAULT_WINDOW_WIDTH, COMPACT_WINDOW_WIDTH = 170, 112
 local STATUS_ROW_UNITS = { "player", "party1", "party2", "party3", "party4" }
 
 -- Localized spell name for this client (so the /cast macro works on
@@ -1046,20 +1130,21 @@ local function CreateBarRowForUnit(unit)
     -- straight onto the row too (see OnRightClickOpenMenu above).
     row:HookScript("OnMouseUp", OnRightClickOpenMenu)
 
-    -- A real aura scan can't confirm the Blessing landed while aura data is
-    -- hidden (combat) — mark it up on the strength of the click itself, same
-    -- as PriestShieldVisual assumes its shield landed the moment it's cast.
+    -- PostClick fires whether or not the macro's cast actually landed (out
+    -- of range, say), so it only notes who was targeted — Core.lua marks
+    -- it up only once UNIT_SPELLCAST_SUCCEEDED confirms the cast actually
+    -- went through, same as it already does for the Seal/RF/Aura watches.
     -- Left-click only: right-click here is the context menu, not a cast.
     -- The held modifier says which Blessing the macro just cast (we built
     -- it), so the status window can show its actual icon right away.
     row:SetScript("PostClick", function(self, button)
-        if button ~= "LeftButton" or not PaladinSealAlert_OptimisticBlessingCast then return end
+        if button ~= "LeftButton" or not PaladinSealAlert_NoteRowClick then return end
         local db = PaladinSealAlertDB
         local bindingKey = IsShiftKeyDown() and "blessingShiftKey"
             or IsControlKeyDown() and "blessingCtrlKey"
             or "blessingPlainKey"
         local icon = PaladinSealAlert_GetBlessingIcon and db and PaladinSealAlert_GetBlessingIcon(db[bindingKey])
-        PaladinSealAlert_OptimisticBlessingCast(unit, icon)
+        PaladinSealAlert_NoteRowClick(unit, icon)
     end)
 
     return row
@@ -1097,6 +1182,12 @@ combatRow:SetPoint("TOPLEFT", statusWindow, "BOTTOMLEFT", 4, 1)
 combatRow:SetPoint("TOPRIGHT", statusWindow, "BOTTOMRIGHT", -4, 1)
 AddBarVisuals(combatRow)
 pcall(function() combatRow.text:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE") end)
+-- This is a one-off note, not a real member row, so it doesn't need
+-- AddBarVisuals' left offset (reserved for a party row's accent bar and
+-- Blessing icon) — center it instead, especially needed now that the
+-- window itself can be much narrower (see COMPACT_WINDOW_WIDTH).
+combatRow.text:ClearAllPoints()
+combatRow.text:SetPoint("CENTER")
 combatRow:SetScript("OnMouseUp", OnRightClickOpenMenu)
 combatRow:Hide()
 
@@ -1132,34 +1223,62 @@ local function SetBarVisuals(row, label, mode, classToken, buffIcon, otherBuffIc
     end
 end
 
+-- Drives a Cooldown widget's swipe from a named self-watch's recast timer
+-- (see PaladinSealAlert_GetWatchTimerInfo) — shared by the Seal ring and
+-- the Righteous Fury badge below.
+local function UpdateWatchCooldown(cooldownFrame, key)
+    if not (PaladinSealAlert_GetWatchTimerInfo and CooldownFrame_Set) then return nil, nil end
+    local startTime, duration = PaladinSealAlert_GetWatchTimerInfo(key)
+    if startTime then
+        CooldownFrame_Set(cooldownFrame, startTime, duration, true)
+    else
+        cooldownFrame:Clear()
+    end
+    return startTime, duration
+end
+
 local function RefreshStatusWindow()
     if not statusWindow:IsShown() then return end
     if not PaladinSealAlert_GetStatusSnapshot then return end
 
     local snapshot = PaladinSealAlert_GetStatusSnapshot()
 
-    local visibleBadges = {}
-    SetBadgeStatus(sealBadge, snapshot.sealUp, snapshot.sealIcon or DEFAULT_SEAL_ICON)
-    table.insert(visibleBadges, sealBadge)
+    sealIcon:ClearAllPoints()
+    sealIcon:SetPoint("TOP", statusWindow, "TOP", 0, GetBadgeY())
+    SetSoftBorderColor(sealIcon.border, snapshot.sealUp and BORDER_OK or BORDER_BAD)
+    sealTexture:SetTexture(snapshot.sealIcon or DEFAULT_SEAL_ICON)
+    sealTexture:SetDesaturated(not snapshot.sealUp)
+    sealIcon:Show()
+    local sealStart, sealDuration = UpdateWatchCooldown(sealCooldown, "seal")
+    if sealStart then
+        local remaining = math.max(0, math.ceil(sealDuration - (GetTime() - sealStart)))
+        sealCountdownText:SetText(remaining > 0 and remaining or "")
+        sealCountdownText:Show()
+    else
+        sealCountdownText:Hide()
+    end
 
+    local smallBadges = {}
     if snapshot.rfEnabled then
-        SetBadgeStatus(rfBadge, snapshot.rfUp, RF_ICON)
-        table.insert(visibleBadges, rfBadge)
+        SetSmallBadgeStatus(rfBadge, snapshot.rfUp, RF_ICON)
+        table.insert(smallBadges, rfBadge)
     else
         rfBadge:Hide()
     end
 
     if snapshot.auraEnabled then
-        SetBadgeStatus(auraBadge, snapshot.auraUp, snapshot.auraIcon or DEFAULT_AURA_ICON)
-        table.insert(visibleBadges, auraBadge)
+        SetSmallBadgeStatus(auraBadge, snapshot.auraUp, snapshot.auraIcon or DEFAULT_AURA_ICON)
+        table.insert(smallBadges, auraBadge)
     else
         auraBadge:Hide()
     end
 
-    LayoutBadges(visibleBadges)
+    LayoutSmallBadges(smallBadges)
 
-    local barTop = GetBadgeY() - BADGE_HEIGHT - 10
-    local barWidth = statusWindow:GetWidth() - 16
+    local headerHeight = SEAL_RING_SIZE + HEADER_BOTTOM_PAD
+        + (#smallBadges > 0 and (HEADER_GAP + SMALL_BADGE_SIZE) or 0)
+    local barTop = GetBadgeY() - headerHeight
+    local barWidth = DEFAULT_WINDOW_WIDTH - 16
     local rowIndex = 0
     -- In combat the rows (and the window) are frozen in place — see
     -- RunOutOfCombat. Rows already showing still get their colors/icons
@@ -1219,10 +1338,20 @@ local function RefreshStatusWindow()
     if layoutFrozen then return end
 
     -- SetSize (not just SetHeight) plus re-applying the backdrop makes the
-    -- border redraw against the new size right away; the extra bottom
-    -- padding keeps the last row comfortably inside the border.
-    local totalHeight = (barTop * -1) + rowIndex * (BAR_HEIGHT + BAR_GAP) + 22
-    statusWindow:SetSize(statusWindow:GetWidth(), math.max(70, totalHeight))
+    -- border redraw against the current size right away. With no rows at
+    -- all (party tracking off, e.g. in a BG — see Core.lua) the window
+    -- hugs the Seal/RF/Aura icons closely instead of using the row
+    -- layout's own bottom padding, which left a lot of empty space below
+    -- them with nothing to fill it.
+    local totalHeight, windowWidth
+    if rowIndex == 0 then
+        totalHeight = (barTop * -1) + 8
+        windowWidth = COMPACT_WINDOW_WIDTH
+    else
+        totalHeight = (barTop * -1) + rowIndex * (BAR_HEIGHT + BAR_GAP) + 22
+        windowWidth = DEFAULT_WINDOW_WIDTH
+    end
+    statusWindow:SetSize(windowWidth, math.max(70, totalHeight))
     ApplyStatusWindowBackdrop()
 end
 
@@ -1234,10 +1363,11 @@ function PaladinSealAlert_RefreshStatusWindowVisibility()
     -- Party Blessing tracking means nothing on other classes — keep the
     -- window out of the way on alts even though the addon is enabled.
     local isPaladin = not PaladinSealAlert_IsPaladin or PaladinSealAlert_IsPaladin()
-    -- Also hidden while paused in a battleground/arena (see Core.lua).
-    local suspended = PaladinSealAlert_IsSuspended and PaladinSealAlert_IsSuspended()
+    -- In a BG/arena, only party Blessing tracking is paused (see Core.lua)
+    -- — Seal/RF/Aura keep going, so the window stays up for those instead
+    -- of disappearing outright.
     RunOutOfCombat("visibility", function()
-        if db.showStatusWindow and isPaladin and not suspended then
+        if db.showStatusWindow and isPaladin then
             statusWindow:Show()
             RefreshStatusWindow()
         else

@@ -403,7 +403,12 @@ local pvpSuspended = false
 
 local function TriggerAlert(message, isGroup)
     local db = PaladinSealAlertDB
-    if pvpSuspended then return end
+    -- Group (party Blessing) tracking is genuinely impossible in a BG/arena
+    -- — it needs real aura reads on other units, which stay hidden there
+    -- the whole time — so those alerts stay suppressed. Your own Seal/RF/
+    -- Aura, though, are tracked the same combat-safe way as mid-fight, so
+    -- those alerts are allowed through even while paused.
+    if pvpSuspended and isGroup then return end
     if db.enableSound then
         PlayConfiguredSound(isGroup)
     end
@@ -485,24 +490,20 @@ local function UpdateBuffState(state, aura, warnBeforeSeconds, onWarning, onExpi
     end
 end
 
--- Forward-declared: the Seal re-cast timer below is assigned once
--- RestartSealClickTimer exists, but ClearBuffStateSilently (defined here,
--- used earlier in the file than that) needs to cancel it too whenever a
--- Seal watch is wiped outright (death, PvP suspend) so a stale timer can't
--- fire a false "fell off" alert afterwards.
-local sealClickTimer = nil
-
 -- Forget a buff without alerting — used when it's gone for a reason that
--- isn't worth an alert (death wipes every buff at once).
+-- isn't worth an alert (death wipes every buff at once). state.timer, if
+-- any (see RestartRecastTimer below), is cancelled too so a stale one
+-- can't fire a false "fell off" alert afterwards.
 local function ClearBuffStateSilently(state)
     state.has = false
     state.signature = nil
     state.warned = false
     state.icon = nil
     state.auraInstanceID = nil
-    if state.key == "seal" and sealClickTimer then
-        sealClickTimer:Cancel()
-        sealClickTimer = nil
+    if state.timer then
+        state.timer:Cancel()
+        state.timer = nil
+        state.timerStartedAt = nil
     end
 end
 
@@ -600,10 +601,23 @@ local function PruneGroupState()
     end
 end
 
--- Called right after a click-cast row fires (see UI.lua's row PostClick).
+-- A click-cast row's PostClick fires whenever the row is clicked, whether
+-- or not the macro's cast actually landed — clicking a row for someone out
+-- of range (or any other reason [@unit,help] fails) still fires PostClick,
+-- with nothing to say the cast itself didn't go through. So a row click
+-- only *notes* who was targeted here; the actual "mark it up" below only
+-- happens once UNIT_SPELLCAST_SUCCEEDED confirms a real cast landed (see
+-- OnPlayerCastSucceeded), which never fires for a failed/out-of-range cast.
+local pendingRowClick = nil
+local PENDING_ROW_CLICK_WINDOW = 1.5
+
+function PaladinSealAlert_NoteRowClick(unit, icon)
+    pendingRowClick = { unit = unit, icon = icon, time = GetTime() }
+end
+
 -- A real aura scan can't confirm the Blessing landed while the client is
--- hiding aura data (combat), so this marks it as up on the strength of the
--- click itself instead — the same "assume it from the cast, let the next
+-- hiding aura data (combat), so this marks it as up on the strength of a
+-- confirmed cast instead — the same "assume it from the cast, let the next
 -- readable scan correct it" trick PriestShieldVisual uses for Power Word:
 -- Shield. A guid we don't know yet (first cast on them this session) gets a
 -- fresh state; ScanGroupBlessings reconciles it as soon as a scan can run.
@@ -640,13 +654,24 @@ end
 -- another entry in SELF_WATCHES.
 -- ---------------------------------------------------------------------------
 
+-- recastTimeoutSeconds: a plain re-cast reminder, independent of aura
+-- scanning entirely — every cast of that watch restarts a countdown of
+-- that length; if no further cast refreshes it in time, alert, same as
+-- if a real scan had seen it fall off. Seal's 30s is a guess (it doesn't
+-- have a real duration here, this is just "remind me"); Righteous Fury's
+-- 1800s (30 min) is its actual buff duration on this client, so that one
+-- doubles as a real expiry warning, not just a reminder. Aura has neither
+-- — it doesn't expire on its own at all. Runs always (combat or not) —
+-- it's tracking casts, not waiting on a read that's often unavailable.
 local SELF_WATCHES = {
     { key = "seal", find = FindActiveSeal, enabledKey = nil, matcher = SEAL_MATCHER,
       msgExpiredKey = "msgExpired", msgWarningKey = "msgWarning",
-      has = false, signature = nil, warned = false, auraInstanceID = nil },
+      has = false, signature = nil, warned = false, auraInstanceID = nil,
+      recastTimeoutSeconds = 30, timer = nil, timerStartedAt = nil },
     { key = "rf", find = FindActiveRighteousFury, enabledKey = "enableRighteousFuryWatch", matcher = RIGHTEOUS_FURY_MATCHER,
       msgExpiredKey = "msgRFExpired", msgWarningKey = "msgRFWarning",
-      has = false, signature = nil, warned = false, auraInstanceID = nil },
+      has = false, signature = nil, warned = false, auraInstanceID = nil,
+      recastTimeoutSeconds = 1800, timer = nil, timerStartedAt = nil },
     { key = "aura", find = FindActiveAura, enabledKey = "enableAuraWatch", matcher = AURA_MATCHER,
       msgExpiredKey = "msgAuraExpired", msgWarningKey = "msgAuraWarning",
       has = false, signature = nil, warned = false, auraInstanceID = nil },
@@ -659,23 +684,17 @@ local function GetSelfWatch(key)
     return nil
 end
 
--- A plain re-cast reminder, independent of aura scanning entirely: every
--- Seal cast restarts a 30s countdown; if no further Seal cast refreshes it
--- in time, alert. If one does, the countdown just restarts. This runs
--- always (combat or not) — it's tracking clicks, not the real buff state.
-local SEAL_CLICK_TIMEOUT_SECONDS = 30
-
-local function CancelSealClickTimer()
-    if sealClickTimer then
-        sealClickTimer:Cancel()
-        sealClickTimer = nil
+local function CancelRecastTimer(watch)
+    if watch.timer then
+        watch.timer:Cancel()
+        watch.timer = nil
+        watch.timerStartedAt = nil
     end
 end
 
-local function OnSealClickTimeout()
-    sealClickTimer = nil
-    local watch = GetSelfWatch("seal")
-    if not watch then return end
+local function OnRecastTimeout(watch)
+    watch.timer = nil
+    watch.timerStartedAt = nil
     if watch.has and PassesThrottle(watch, "lastExpireAlert") then
         TriggerAlert(PaladinSealAlertDB[watch.msgExpiredKey])
     end
@@ -686,9 +705,17 @@ local function OnSealClickTimeout()
     watch.auraInstanceID = nil
 end
 
-local function RestartSealClickTimer()
-    CancelSealClickTimer()
-    sealClickTimer = C_Timer.NewTimer(SEAL_CLICK_TIMEOUT_SECONDS, OnSealClickTimeout)
+local function RestartRecastTimer(watch)
+    CancelRecastTimer(watch)
+    watch.timerStartedAt = GetTime()
+    watch.timer = C_Timer.NewTimer(watch.recastTimeoutSeconds, function() OnRecastTimeout(watch) end)
+end
+
+-- Exposed for UI.lua: drives the Seal/RF icons' cooldown-style swipe.
+function PaladinSealAlert_GetWatchTimerInfo(key)
+    local watch = GetSelfWatch(key)
+    if not watch then return nil, nil end
+    return watch.timerStartedAt, watch.recastTimeoutSeconds
 end
 
 -- A manual cancel (right-click your own buff icon to remove it) during
@@ -709,8 +736,8 @@ local function HandleWatchAuraRemoved(watch)
     watch.warned = false
     watch.icon = nil
     watch.auraInstanceID = nil
-    if watch.key == "seal" then
-        CancelSealClickTimer()
+    if watch.timer then
+        CancelRecastTimer(watch)
     end
 end
 
@@ -740,8 +767,8 @@ local function OnPlayerAuraUpdate(updateInfo)
                                 watch.signature = "optimistic:" .. tostring(GetTime())
                                 watch.warned = false
                                 watch.icon = GetSpellIconByID(spellID) or watch.icon
-                                if watch.key == "seal" then
-                                    RestartSealClickTimer()
+                                if watch.recastTimeoutSeconds then
+                                    RestartRecastTimer(watch)
                                 end
                             end
                         end
@@ -793,18 +820,28 @@ local function OnPlayerCastSucceeded(spellID)
             watch.signature = "optimistic:" .. tostring(GetTime())
             watch.warned = false
             watch.icon = GetSpellIconByID(spellID) or watch.icon
-            if watch.key == "seal" then
-                RestartSealClickTimer()
+            if watch.recastTimeoutSeconds then
+                RestartRecastTimer(watch)
             end
         end
     end
 
-    -- Same trick for a Blessing cast the normal way (action bar, keybind,
-    -- macro — anything other than our own click-cast rows, which already
-    -- mark this via PostClick). Whoever's currently targeted, if that's you
-    -- or a party member, is who it landed on; with no such target it must
-    -- have been a self-cast.
     if MatchesAura(name, BLESSING_MATCHER) then
+        -- A click-cast row firing *and actually succeeding* beats guessing
+        -- from target — it names the exact unit, no ambiguity. Stale
+        -- beyond the window, it's not this cast's click; fall through to
+        -- the target-based guess below instead.
+        if pendingRowClick and (GetTime() - pendingRowClick.time) <= PENDING_ROW_CLICK_WINDOW then
+            PaladinSealAlert_OptimisticBlessingCast(pendingRowClick.unit, pendingRowClick.icon or GetSpellIconByID(spellID))
+            pendingRowClick = nil
+            return
+        end
+        pendingRowClick = nil
+
+        -- Otherwise this was cast the normal way (action bar, keybind,
+        -- macro). Whoever's currently targeted, if that's you or a party
+        -- member, is who it landed on; with no such target it must have
+        -- been a self-cast.
         local unit = "player"
         if UnitExists("target") and (UnitIsUnit("target", "player") or UnitInParty("target")) then
             unit = "target"
@@ -838,7 +875,11 @@ local function ProcessSelfWatch(watch)
 end
 
 local function OnTick()
-    if pvpSuspended then return end
+    -- No separate pvpSuspended check here on purpose: a BG/arena hides
+    -- aura data the whole time, so AurasAreSecret() below already catches
+    -- it exactly like combat does — self-watches keep their last known
+    -- state (or whatever the optimistic cast path sets), group scanning
+    -- just doesn't happen since it can't produce anything real anyway.
     if AurasAreSecret() then
         -- Buff tracking is silently paused for the duration of combat (see
         -- AurasAreSecret) and resumes on its own once combat ends.
@@ -900,14 +941,15 @@ local function UpdatePvPSuspension()
     pvpSuspended = shouldSuspend
 
     if shouldSuspend then
-        for _, watch in ipairs(SELF_WATCHES) do
-            ClearBuffStateSilently(watch)
-        end
+        -- Party Blessing tracking is dropped entirely — it needs real
+        -- aura reads on other units, which BGs/arenas hide the whole
+        -- time. Your own Seal/RF/Aura are left alone: they keep tracking
+        -- via the same combat-safe cast-based path combat already uses.
         wipe(groupState)
         if not pvpNoticeShown then
             pvpNoticeShown = true
-            print(PREFIX .. "paused in battlegrounds and arenas (buff data is hidden there). "
-                .. "Type /sealalert pvp off to keep it running.")
+            print(PREFIX .. "party Blessing tracking paused in battlegrounds and arenas (buff data for others is hidden there); your own Seal/Righteous Fury/Aura keep tracking. "
+                .. "Type /sealalert pvp off to keep it all running.")
         end
     end
     if PaladinSealAlert_RefreshStatusWindowVisibility then PaladinSealAlert_RefreshStatusWindowVisibility() end
@@ -966,6 +1008,7 @@ eventFrame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
 eventFrame:RegisterEvent("LOADING_SCREEN_ENABLED")
 eventFrame:RegisterEvent("LOADING_SCREEN_DISABLED")
 eventFrame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
+eventFrame:RegisterEvent("PLAYER_DEAD")
 eventFrame:SetScript("OnEvent", function(self, event, unit, updateInfo, spellID)
     if event == "LOADING_SCREEN_ENABLED" then
         loadingScreenActive = true
@@ -1005,6 +1048,16 @@ eventFrame:SetScript("OnEvent", function(self, event, unit, updateInfo, spellID)
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
         if IsPlayerPaladin() then
             OnPlayerCastSucceeded(spellID)
+        end
+    elseif event == "PLAYER_DEAD" then
+        -- Normally OnTick's own dead-check handles this, but that's gated
+        -- behind AurasAreSecret() — which stays true for the whole length
+        -- of a BG/arena, not just active combat — so dying there would
+        -- otherwise never clear the self-watches at all. Death itself
+        -- needs no aura read to know about, so it's handled directly here
+        -- instead of waiting on a tick that may never come.
+        for _, watch in ipairs(SELF_WATCHES) do
+            ClearBuffStateSilently(watch)
         end
     end
 end)
@@ -1271,7 +1324,10 @@ function PaladinSealAlert_GetStatusSnapshot()
     local rfWatch = GetSelfWatch("rf")
     local auraWatch = GetSelfWatch("aura")
     local members = {}
-    for _, unit in ipairs(GROUP_UNITS) do
+    -- Party Blessing tracking is off in a BG/arena (see UpdatePvPSuspension)
+    -- — showing rows here would just be stale/misleading "unbuffed" guesses
+    -- for people we've deliberately stopped watching, not real data.
+    for _, unit in ipairs(pvpSuspended and {} or GROUP_UNITS) do
         if UnitExists(unit) then
             local guid = UnitGUID(unit)
             local state = guid and groupState[guid]
